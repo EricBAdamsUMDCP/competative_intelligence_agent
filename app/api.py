@@ -1,3 +1,4 @@
+# app/api.py
 from fastapi import FastAPI, Depends, HTTPException, Security
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
@@ -16,6 +17,8 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.knowledge.graph_store import KnowledgeGraph
 from core.collectors.sam_gov import SamGovCollector
+from core.collectors.usa_spending import USASpendingCollector
+from core.collectors.news_scraper import NewsCollector
 from core.processors.entity_extractor import EntityExtractor
 
 # Initialize API
@@ -90,22 +93,37 @@ def search(query: Query, graph: KnowledgeGraph = Depends(get_knowledge_graph), a
         raise HTTPException(status_code=500, detail=f"Search error: {str(e)}")
 
 @app.get("/collect")
-async def collect_data(api_key: str = Depends(get_api_key)):
-    """Manually trigger data collection"""
+async def collect_data(sources: str = None, api_key: str = Depends(get_api_key)):
+    """Manually trigger data collection from specified sources or all sources"""
     global entity_extractor
     
+    # Determine which sources to collect from
+    source_list = sources.split(",") if sources else ["sam.gov", "usaspending.gov", "industry_news"]
+    
+    results = {}
+    all_items = []
+    
     try:
-        # Initialize collector
-        collector = SamGovCollector()
+        # Initialize collectors based on requested sources
+        collectors = []
+        if "sam.gov" in source_list:
+            collectors.append(SamGovCollector())
+        if "usaspending.gov" in source_list:
+            collectors.append(USASpendingCollector())
+        if "industry_news" in source_list:
+            collectors.append(NewsCollector())
         
-        # Run collection
-        results = await collector.run()
+        # Run all collectors
+        for collector in collectors:
+            source_results = await collector.run()
+            results[collector.source_name] = len(source_results)
+            all_items.extend(source_results)
         
-        logger.info(f"Collected {len(results)} items")
+        logger.info(f"Collected a total of {len(all_items)} items from {len(collectors)} sources")
         
         # Process entities
         processed_results = []
-        for item in results:
+        for item in all_items:
             if entity_extractor:
                 item = entity_extractor.process_document(item)
             processed_results.append(item)
@@ -128,7 +146,8 @@ async def collect_data(api_key: str = Depends(get_api_key)):
             
             return {
                 "status": "success",
-                "collected": len(results),
+                "sources": results,
+                "total_collected": len(all_items),
                 "processed": len(processed_results),
                 "stored": count
             }
@@ -228,3 +247,73 @@ def get_entity_statistics(graph: KnowledgeGraph = Depends(get_knowledge_graph), 
     except Exception as e:
         logger.error(f"Entity statistics error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Entity statistics error: {str(e)}")
+
+@app.get("/sources")
+def get_data_sources(api_key: str = Depends(get_api_key)):
+    """Get information about available data sources"""
+    return {
+        "sources": [
+            {
+                "id": "sam.gov",
+                "name": "SAM.gov",
+                "description": "Federal contract opportunities and awards",
+                "last_updated": None,
+                "status": "active"
+            },
+            {
+                "id": "usaspending.gov",
+                "name": "USASpending.gov",
+                "description": "Federal spending data and contract details",
+                "last_updated": None,
+                "status": "active"
+            },
+            {
+                "id": "industry_news",
+                "name": "Industry News",
+                "description": "Government contracting news from industry sources",
+                "last_updated": None,
+                "status": "active"
+            }
+        ]
+    }
+
+@app.get("/source/{source_id}")
+def get_source_data(source_id: str, api_key: str = Depends(get_api_key)):
+    """Get detailed information about a specific data source"""
+    sources = {
+        "sam.gov": {
+            "id": "sam.gov",
+            "name": "SAM.gov",
+            "description": "Federal contract opportunities and awards",
+            "endpoint": "https://api.sam.gov/opportunities/v1/search",
+            "data_types": ["opportunities", "awards", "entities"],
+            "last_updated": None,
+            "item_count": 0,
+            "status": "active"
+        },
+        "usaspending.gov": {
+            "id": "usaspending.gov",
+            "name": "USASpending.gov",
+            "description": "Federal spending data and contract details",
+            "endpoint": "https://api.usaspending.gov/api/v2/search/spending_by_award/",
+            "data_types": ["awards", "agencies", "recipients"],
+            "last_updated": None,
+            "item_count": 0,
+            "status": "active" 
+        },
+        "industry_news": {
+            "id": "industry_news",
+            "name": "Industry News",
+            "description": "Government contracting news from industry sources",
+            "sources": ["Washington Technology", "Federal News Network", "FCW"],
+            "data_types": ["news", "trends", "announcements"],
+            "last_updated": None,
+            "item_count": 0,
+            "status": "active"
+        }
+    }
+    
+    if source_id not in sources:
+        raise HTTPException(status_code=404, detail=f"Source {source_id} not found")
+    
+    return sources[source_id]

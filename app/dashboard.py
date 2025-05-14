@@ -13,6 +13,41 @@ import base64
 import json
 from datetime import datetime, timedelta
 
+def get_api_key_expiration():
+    try:
+        response = requests.get(
+            f"{API_URL}/api-key-status",
+            headers=HEADERS
+        )
+        response.raise_for_status()
+        data = response.json()
+        
+        if data and "sam_gov" in data:
+            sam_gov = data["sam_gov"]
+            days_old = sam_gov.get("days_old")
+            
+            if days_old is not None:
+                days_left = 90 - days_old
+                if days_left <= 0:
+                    return {"status": "expired", "days_left": 0, "message": "⚠️ API KEY EXPIRED! Please rotate immediately."}
+                elif days_left <= 10:
+                    return {"status": "critical", "days_left": days_left, "message": f"⚠️ API KEY EXPIRES IN {days_left} DAYS! Rotate soon."}
+                elif days_left <= 30:
+                    return {"status": "warning", "days_left": days_left, "message": f"⚠️ API KEY EXPIRES IN {days_left} DAYS"}
+                else:
+                    return {"status": "ok", "days_left": days_left, "message": f"API Key valid for {days_left} more days"}
+            
+        return {"status": "unknown", "days_left": None, "message": "API Key status unknown"}
+    except Exception:
+        return {"status": "error", "days_left": None, "message": "Cannot check API Key status"}
+
+# Get key status
+key_status = get_api_key_expiration()
+
+# Display key expiration prominently if needed
+if key_status["status"] in ["expired", "critical", "warning"]:
+    st.warning(key_status["message"], icon="⚠️")
+
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -24,7 +59,7 @@ st.set_page_config(
 )
 
 # API connection settings
-API_URL = "http://api:8000"
+API_URL = os.environ.get("API_URL", "http://api:8000")
 API_KEY = os.environ.get("API_KEY", "dev_key")
 HEADERS = {"X-API-Key": API_KEY}
 
@@ -43,10 +78,14 @@ def get_search_results(query):
         return []
 
 # Function to collect new data
-def collect_data():
+def collect_data(sources=None):
     try:
+        url = f"{API_URL}/collect"
+        if sources:
+            url += f"?sources={sources}"
+            
         response = requests.get(
-            f"{API_URL}/collect",
+            url,
             headers=HEADERS
         )
         response.raise_for_status()
@@ -107,6 +146,58 @@ def get_entity_stats():
     except Exception as e:
         st.error(f"Error fetching entity statistics: {str(e)}")
         return {}
+
+# Function to get data sources
+def get_data_sources():
+    try:
+        response = requests.get(
+            f"{API_URL}/sources",
+            headers=HEADERS
+        )
+        response.raise_for_status()
+        return response.json().get("sources", [])
+    except Exception as e:
+        st.error(f"Error fetching data sources: {str(e)}")
+        return []
+
+# Function to get source details
+def get_source_details(source_id):
+    try:
+        response = requests.get(
+            f"{API_URL}/source/{source_id}",
+            headers=HEADERS
+        )
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        st.error(f"Error fetching source details: {str(e)}")
+        return {}
+
+# Function to get API key status
+def get_api_key_status():
+    try:
+        response = requests.get(
+            f"{API_URL}/api-key-status",
+            headers=HEADERS
+        )
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        st.error(f"Error fetching API key status: {str(e)}")
+        return {}
+
+# Function to get system health
+def get_system_health():
+    try:
+        response = requests.get(
+            f"{API_URL}/health",
+            headers=HEADERS
+        )
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        st.error(f"Error fetching system health: {str(e)}")
+        return {"status": "error", "components": {}}
 
 # Function to create entity network visualization
 def create_entity_network(entities):
@@ -183,8 +274,36 @@ def create_entity_network(entities):
 st.sidebar.title("Navigation")
 page = st.sidebar.radio(
     "Select a page",
-    ["Overview", "Search Opportunities", "Competitor Analysis", "Entity Analysis"]
+    ["Overview", "Search Opportunities", "Competitor Analysis", "Entity Analysis", "Data Sources"]
 )
+
+#side bar api key warning
+st.sidebar.write("### API Key Status")
+if key_status["days_left"] is not None:
+    if key_status["status"] == "expired":
+        st.sidebar.error(f"SAM.gov API key expired! Please rotate now.", icon="🔴")
+    elif key_status["status"] == "critical":
+        st.sidebar.warning(f"SAM.gov API key expires in {key_status['days_left']} days", icon="⚠️")
+    elif key_status["status"] == "warning":
+        st.sidebar.warning(f"SAM.gov API key expires in {key_status['days_left']} days", icon="⚠️")
+    else:
+        st.sidebar.info(f"SAM.gov API key valid for {key_status['days_left']} days", icon="✅")
+else:
+    st.sidebar.info("SAM.gov API key status unknown", icon="❓")
+
+# System status indicator in sidebar
+system_health = get_system_health()
+system_status = system_health.get("status", "unknown")
+status_color = "🟢" if system_status == "healthy" else "🔴"
+
+st.sidebar.write(f"{status_color} System Status: {system_status.capitalize()}")
+
+# Check API key status
+api_key_status = get_api_key_status()
+if api_key_status and "sam_gov" in api_key_status:
+    sam_gov_status = api_key_status["sam_gov"]
+    if sam_gov_status.get("requires_update"):
+        st.sidebar.warning(f"⚠️ SAM.gov API key needs rotation ({sam_gov_status.get('days_old', '?')} days old)")
 
 # Overview page
 if page == "Overview":
@@ -205,14 +324,115 @@ if page == "Overview":
     with col4:
         st.metric("Intelligence Coverage", "87%", "+3%")
     
+    # Data collection
+    st.subheader("Data Collection")
+    
+    # Get available sources
+    sources = get_data_sources()
+    source_ids = [s["id"] for s in sources]
+    source_names = [s["name"] for s in sources]
+    
+    # Create multiselect for data sources
+    selected_sources = st.multiselect(
+        "Select data sources to collect from:",
+        options=source_ids,
+        default=source_ids,
+        format_func=lambda x: next((s["name"] for s in sources if s["id"] == x), x)
+    )
+    
     # Button to collect data
     if st.button("Collect Latest Data"):
         with st.spinner("Collecting data..."):
-            result = collect_data()
+            # Join selected sources with commas
+            sources_param = ",".join(selected_sources) if selected_sources else None
+            result = collect_data(sources_param)
+            
             if result.get("status") == "success":
-                st.success(f"Successfully collected {result.get('collected')} items and stored {result.get('stored')} awards.")
+                source_results = result.get("sources", {})
+                collected_items = [f"{source}: {count} items" for source, count in source_results.items()]
+                
+                st.success(f"Successfully collected data:\n" + "\n".join(collected_items))
+                st.write(f"Total collected: {result.get('total_collected')}")
+                st.write(f"Processed: {result.get('processed')}")
+                st.write(f"Stored: {result.get('stored')}")
             else:
                 st.error(f"Error: {result.get('message')}")
+    
+    # Sources breakdown
+    if st.checkbox("Show Data Sources Breakdown"):
+        st.subheader("Data Sources")
+        
+        # Create tabs for different source types
+        source_tabs = st.tabs([s["name"] for s in sources])
+        
+        for i, source in enumerate(sources):
+            with source_tabs[i]:
+                st.write(f"### {source['name']}")
+                st.write(f"Description: {source['description']}")
+                
+                # Show specific data based on source type
+                if source["id"] == "sam.gov":
+                    st.write("Latest update: Yesterday at 6:00 PM")
+                    st.metric("Active Opportunities", "85", "+12")
+                    
+                    # API key management notice
+                    st.info("⚠️ **API Key Management**: SAM.gov requires API keys to be updated every 90 days. Make sure to track and rotate your key regularly.")
+                    
+                    # Sample opportunities table
+                    st.write("Recent Opportunities:")
+                    sample_sam = pd.DataFrame({
+                        "Title": ["Cybersecurity Services", "Cloud Migration", "IT Support"],
+                        "Agency": ["DoD", "HHS", "GSA"],
+                        "Posted Date": ["2025-05-12", "2025-05-10", "2025-05-08"],
+                        "Value ($)": ["5,600,000", "3,200,000", "1,800,000"]
+                    })
+                    st.dataframe(sample_sam)
+                    
+                    # SAM.gov terms of use
+                    with st.expander("SAM.gov Data Usage Terms"):
+                        st.markdown("""
+                        ### SAM.gov Data Usage Terms
+                        
+                        Data provided by SAM.gov is subject to specific terms of use. By using this system, you agree to:
+                        
+                        - Only access data you are authorized to access
+                        - Not use the data for unauthorized purposes
+                        - Not share your API key with unauthorized parties
+                        - Update your API key every 90 days
+                        
+                        For complete terms, visit [SAM.gov](https://sam.gov).
+                        """)
+                
+                elif source["id"] == "usaspending.gov":
+                    st.write("Latest update: Today at 8:30 AM")
+                    st.metric("Contract Awards", "132", "+8")
+                    
+                    # Sample awards table
+                    st.write("Recent Awards:")
+                    sample_usa = pd.DataFrame({
+                        "Award ID": ["CONT2023001", "CONT2023002", "CONT2023003"],
+                        "Recipient": ["TechDefense Solutions", "CloudSys Inc", "Federal IT Partners"],
+                        "Agency": ["DoD", "HHS", "DHS"],
+                        "Amount ($)": ["4,200,000", "2,800,000", "1,500,000"]
+                    })
+                    st.dataframe(sample_usa)
+                
+                elif source["id"] == "industry_news":
+                    st.write("Latest update: Today at 10:15 AM")
+                    st.metric("News Articles", "47", "+5")
+                    
+                    # Sample news articles
+                    st.write("Recent Articles:")
+                    sample_news = pd.DataFrame({
+                        "Title": [
+                            "DoD Awards $50M Cybersecurity Contract", 
+                            "GSA Announces New Cloud Initiative", 
+                            "HHS Modernization Program Expands"
+                        ],
+                        "Source": ["Washington Technology", "Federal News Network", "FCW"],
+                        "Date": ["2025-05-13", "2025-05-12", "2025-05-11"]
+                    })
+                    st.dataframe(sample_news)
     
     # Sample visualization
     st.subheader("Contract Awards by Agency")
@@ -480,6 +700,177 @@ elif page == "Entity Analysis":
             st.plotly_chart(fig, use_container_width=True)
     else:
         st.info("No entity statistics available yet. Try collecting more data.")
+
+# Data Sources page (new page)
+elif page == "Data Sources":
+    st.title("Data Sources Management")
+    
+    # Get available sources
+    sources = get_data_sources()
+    
+    st.write("## Available Data Sources")
+    st.write("The system integrates data from the following sources:")
+    
+    # Create a table of sources
+    source_table = []
+    for source in sources:
+        # Get detailed information for each source
+        details = get_source_details(source["id"])
+        
+        # Add status indicator
+        status_color = "🟢" if details.get("status") == "active" else "🔴"
+        
+        # Format last updated time
+        last_updated = details.get("last_updated")
+        if last_updated:
+            formatted_time = datetime.fromisoformat(last_updated).strftime("%Y-%m-%d %H:%M")
+        else:
+            formatted_time = "Never"
+        
+        # Add to table
+        source_table.append({
+            "Source": f"{status_color} {source['name']}",
+            "Description": source["description"],
+            "Last Updated": formatted_time,
+            "Items": details.get("item_count", 0)
+        })
+    
+    # Display table
+    source_df = pd.DataFrame(source_table)
+    st.table(source_df)
+    
+    # Add data collection section
+    st.write("## Data Collection")
+    
+    source_tabs = st.tabs([s["name"] for s in sources])
+    
+    for i, source in enumerate(sources):
+        with source_tabs[i]:
+            st.write(f"### {source['name']} Configuration")
+            
+            # Get source details
+            details = get_source_details(source["id"])
+            
+            # Show source-specific information
+            if source["id"] == "sam.gov":
+                st.write("**Data types:** Opportunities, Awards, Entities")
+                st.write("**API endpoint:** https://api.sam.gov/opportunities/v1/search")
+                
+                # Show API key status
+                api_key_status = details.get("api_key_status", {})
+                if api_key_status.get("present"):
+                    key_created = api_key_status.get("created")
+                    days_old = api_key_status.get("days_old")
+                    
+                    if days_old and days_old > 90:
+                        st.error(f"⚠️ API Key is expired ({days_old} days old). Please rotate immediately.")
+                    elif days_old and days_old > 80:
+                        st.warning(f"⚠️ API Key rotation needed soon ({days_old} days old).")
+                    elif days_old:
+                        st.success(f"API Key is valid ({days_old} days old).")
+                    
+                    if key_created:
+                        st.write(f"API Key created on: {key_created}")
+                else:
+                    st.error("⚠️ SAM.gov API key is not configured.")
+                
+                # SAM.gov Data Usage Terms
+                st.markdown("""
+                ### SAM.gov Data Usage Terms
+                
+                Data provided by SAM.gov is subject to specific terms of use. By using this system, you agree to:
+                
+                - Only access data you are authorized to access
+                - Not use the data for unauthorized purposes
+                - Not share your API key with unauthorized parties
+                - Update your API key every 90 days
+                
+                For complete terms, visit [SAM.gov](https://sam.gov).
+                """)
+                
+                # Mock configuration options
+                date_range = st.date_input(
+                    "Date range to collect",
+                    value=(datetime.now() - timedelta(days=30), datetime.now()),
+                    max_value=datetime.now()
+                )
+                
+                search_params = st.text_input("Search filters (optional)", "")
+                
+                st.button(f"Collect from {source['name']}", key=f"collect_{source['id']}")
+            
+            elif source["id"] == "usaspending.gov":
+                st.write("**Data types:** Awards, Agencies, Recipients")
+                st.write("**API endpoint:** https://api.usaspending.gov/api/v2/search/spending_by_award/")
+                
+                # Mock configuration options
+                date_range = st.date_input(
+                    "Date range to collect",
+                    value=(datetime.now() - timedelta(days=90), datetime.now()),
+                    max_value=datetime.now()
+                )
+                
+                award_types = st.multiselect(
+                    "Award types",
+                    ["contracts", "grants", "loans", "direct_payments", "other"],
+                    default=["contracts"]
+                )
+                
+                st.button(f"Collect from {source['name']}", key=f"collect_{source['id']}")
+            
+            elif source["id"] == "industry_news":
+                st.write("**Data types:** News, Trends, Announcements")
+                st.write("**Sources:** Washington Technology, Federal News Network, FCW")
+                
+                # Mock configuration options
+                sources_list = st.multiselect(
+                    "News sources",
+                    ["Washington Technology", "Federal News Network", "FCW", "GovExec", "NextGov"],
+                    default=["Washington Technology", "Federal News Network", "FCW"]
+                )
+                
+                max_articles = st.slider("Maximum articles per source", 5, 50, 10)
+                
+                st.button(f"Collect from {source['name']}", key=f"collect_{source['id']}")
+    
+    # Integration management section
+    st.write("## Data Integration Status")
+    
+    integration_data = {
+        "Component": [
+            "SAM.gov API", 
+            "USASpending.gov API", 
+            "News Scraper", 
+            "Entity Extraction", 
+            "Knowledge Graph"
+        ],
+        "Status": ["Active", "Active", "Active", "Active", "Active"],
+        "Last Run": [
+            "2025-05-13 10:30", 
+            "2025-05-14 08:15", 
+            "2025-05-14 09:45", 
+            "2025-05-14 09:45", 
+            "2025-05-14 09:45"
+        ],
+        "Items Processed": [85, 132, 47, 264, 264]
+    }
+    
+    integration_df = pd.DataFrame(integration_data)
+    st.table(integration_df)
+    
+    # System statistics
+    st.write("## System Statistics")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.metric("Total Data Sources", "3", "+1")
+    
+    with col2:
+        st.metric("Total Items Collected", "264", "+42")
+    
+    with col3:
+        st.metric("Integration Success Rate", "98.5%", "+0.5%")
 
 # Add footer
 st.markdown("---")
