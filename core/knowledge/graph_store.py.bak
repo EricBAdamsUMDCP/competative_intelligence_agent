@@ -1,0 +1,85 @@
+# core/knowledge/graph_store.py
+from neo4j import GraphDatabase
+from typing import Dict, List, Any
+import logging
+import os
+from datetime import datetime
+
+class KnowledgeGraph:
+    """Neo4j-based knowledge graph for competitive intelligence"""
+    
+    def __init__(self, uri: str = None, user: str = None, password: str = None):
+        # Use parameters or environment variables
+        self.uri = uri or os.environ.get("NEO4J_URI", "bolt://neo4j:7687")
+        self.user = user or os.environ.get("NEO4J_USER", "neo4j")
+        self.password = password or os.environ.get("NEO4J_PASSWORD", "password")
+        
+        self.driver = GraphDatabase.driver(self.uri, auth=(self.user, self.password))
+        self.logger = logging.getLogger("knowledge_graph")
+        
+        # Initialize schema
+        self._initialize_schema()
+    
+    def _initialize_schema(self):
+        """Set up initial schema constraints"""
+        with self.driver.session() as session:
+            # Create uniqueness constraints
+            session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (a:Agency) REQUIRE a.id IS UNIQUE")
+            session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (c:Contractor) REQUIRE c.id IS UNIQUE")
+            session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (o:Opportunity) REQUIRE o.id IS UNIQUE")
+            session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (p:Person) REQUIRE p.id IS UNIQUE")
+            
+            # Create indexes for full-text search
+            session.run("CREATE FULLTEXT INDEX opportunity_text IF NOT EXISTS FOR (o:Opportunity) ON EACH [o.title, o.description]")
+            
+            self.logger.info("Knowledge graph schema initialized")
+    
+    def add_contract_award(self, award_data: Dict[str, Any]):
+        """Add a contract award to the knowledge graph"""
+        with self.driver.session() as session:
+            session.run("""
+                MERGE (a:Agency {id: $agency_id})
+                ON CREATE SET a.name = $agency_name
+                
+                MERGE (c:Contractor {id: $contractor_id})
+                ON CREATE SET c.name = $contractor_name
+                
+                MERGE (o:Opportunity {id: $opportunity_id})
+                ON CREATE SET o.title = $title,
+                             o.description = $description,
+                             o.value = $value,
+                             o.award_date = $award_date
+                
+                MERGE (c)-[r:WON {award_date: $award_date}]->(o)
+                MERGE (a)-[:AWARDED {award_date: $award_date}]->(o)
+            """, award_data)
+            
+            self.logger.info(f"Added contract award: {award_data.get('title')}")
+    
+    def search_opportunities(self, query: str, limit: int = 10):
+        """Search for opportunities by keyword"""
+        with self.driver.session() as session:
+            result = session.run("""
+                CALL db.index.fulltext.queryNodes("opportunity_text", $query) 
+                YIELD node, score
+                RETURN node.id as id, node.title as title, node.description as description, 
+                       node.value as value, node.award_date as award_date, score
+                LIMIT $limit
+            """, {"query": query, "limit": limit})
+            
+            return [dict(record) for record in result]
+    
+    def get_competitor_insights(self, competitor_id: str):
+        """Get insights about a competitor"""
+        with self.driver.session() as session:
+            result = session.run("""
+                MATCH (c:Contractor {id: $competitor_id})-[r:WON]->(o:Opportunity)<-[:AWARDED]-(a:Agency)
+                RETURN a.name as agency_name, count(o) as contract_count, sum(o.value) as total_value
+                ORDER BY total_value DESC
+            """, {"competitor_id": competitor_id})
+            
+            return [dict(record) for record in result]
+    
+    def close(self):
+        """Close the database connection"""
+        self.driver.close()

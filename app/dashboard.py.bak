@@ -1,0 +1,129 @@
+# app/dashboard.py
+import streamlit as st
+import pandas as pd
+import plotly.express as px
+import requests
+import os
+import sys
+
+# Add project root to path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Configure page
+st.set_page_config(
+    page_title="GovCon Intelligence Dashboard",
+    page_icon="📊",
+    layout="wide"
+)
+
+# API connection settings
+API_URL = "http://api:8000"
+API_KEY = os.environ.get("API_KEY", "dev_key")
+HEADERS = {"X-API-Key": API_KEY}
+
+# Function to fetch data from API
+def get_search_results(query):
+    try:
+        response = requests.post(
+            f"{API_URL}/search",
+            json={"query": query},
+            headers=HEADERS
+        )
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        st.error(f"Error fetching data: {str(e)}")
+        return []
+
+# Function to collect new data
+def collect_data():
+    try:
+        response = requests.get(
+            f"{API_URL}/collect",
+            headers=HEADERS
+        )
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        st.error(f"Error collecting data: {str(e)}")
+        return {"status": "error", "message": str(e)}
+
+# Sidebar navigation
+st.sidebar.title("Navigation")
+page = st.sidebar.radio(
+    "Select a page",
+    ["Overview", "Search Opportunities", "Competitor Analysis"]
+)
+
+# Overview page
+if page == "Overview":
+    st.title("Government Contracting Intelligence Dashboard")
+    
+    # Button to collect data
+    if st.button("Collect Latest Data"):
+        with st.spinner("Collecting data..."):
+            result = collect_data()
+            if result.get("status") == "success":
+                st.success(f"Successfully collected {result.get('collected')} items and stored {result.get('stored')} awards.")
+            else:
+                st.error(f"Error: {result.get('message')}")
+    
+    # Sample visualization
+    st.subheader("Sample Contract Awards by Agency")
+    
+    # Mock data for now
+    data = {
+        "Agency": ["DoD", "HHS", "GSA", "DHS", "DoE"],
+        "Value ($M)": [120, 85, 65, 45, 30]
+    }
+    
+    df = pd.DataFrame(data)
+    fig = px.bar(df, x="Agency", y="Value ($M)", color="Agency")
+    st.plotly_chart(fig, use_container_width=True)
+
+# Search page
+elif page == "Search Opportunities":
+    st.title("Search Contract Opportunities")
+    
+    query = st.text_input("Search for opportunities", "cybersecurity")
+    
+    if st.button("Search"):
+        with st.spinner("Searching..."):
+            results = get_search_results(query)
+            
+            if results:
+                st.success(f"Found {len(results)} results")
+                for result in results:
+                    with st.expander(f"{result.get('title')}"):
+                        st.write(f"**ID:** {result.get('id')}")
+                        st.write(f"**Description:** {result.get('description')}")
+                        st.write(f"**Value:** ${result.get('value', 0):,.2f}")
+                        st.write(f"**Award Date:** {result.get('award_date')}")
+            else:
+                st.info("No results found. Try a different search term or collect some data first.")
+
+# Competitor Analysis
+elif page == "Competitor Analysis":
+    st.title("Competitor Analysis")
+    
+    # Mock data for demonstration
+    competitors = ["TechDefense Solutions", "CloudSys Inc", "Federal IT Partners", "CyberSecure Solutions"]
+    selected_competitor = st.selectbox("Select Competitor", competitors)
+    
+    st.subheader(f"Analysis for {selected_competitor}")
+    
+    # Mock contract history
+    contract_data = pd.DataFrame({
+        "Agency": ["DoD", "HHS", "GSA", "DHS", "DoJ"],
+        "Value ($M)": [12.4, 8.7, 5.2, 3.8, 2.1],
+        "Award Date": pd.date_range(start="1/1/2023", periods=5, freq="M")
+    })
+    
+    # Show contract history
+    st.subheader("Contract History")
+    st.dataframe(contract_data)
+    
+    # Visualization
+    st.subheader("Contract Value by Agency")
+    fig = px.pie(contract_data, values="Value ($M)", names="Agency")
+    st.plotly_chart(fig, use_container_width=True)
