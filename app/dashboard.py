@@ -220,7 +220,9 @@ def create_entity_network(entities):
     for entity_type, entity_list in entities.items():
         for entity in entity_list:
             G.add_node(entity["text"], type=entity_type)
-            colors.append(color_map.get(entity_type, "lightgrey"))
+    
+    # Assign colors to nodes in the order of G.nodes()
+    colors = [color_map.get(G.nodes[n].get("type", ""), "lightgrey") for n in G.nodes()]
     
     # Add edges between related entities
     added_edges = set()
@@ -248,7 +250,12 @@ def create_entity_network(entities):
     # Create visualization
     plt.figure(figsize=(10, 8))
     pos = nx.spring_layout(G)
-    nx.draw_networkx_nodes(G, pos, node_color=colors, node_size=500, alpha=0.8)
+    node_count = len(G.nodes())
+    node_colors = colors if len(colors) == node_count else ["lightgray"] * node_count
+    if len(node_colors) == len(G.nodes()):
+        nx.draw_networkx_nodes(G, pos, nodelist=list(G.nodes()), node_color=node_colors, node_size=500, alpha=0.8)
+    else:
+        nx.draw_networkx_nodes(G, pos, nodelist=list(G.nodes()), node_color=["lightgray"] * len(G.nodes()), node_size=500, alpha=0.8)
     nx.draw_networkx_edges(G, pos, width=1, alpha=0.5)
     nx.draw_networkx_labels(G, pos, font_size=10)
     

@@ -196,6 +196,7 @@ venv/
 
 # Logs
 *.log
+**logs/
 
 # YAML (ignored)
 *.yml
