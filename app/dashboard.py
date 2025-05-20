@@ -7,11 +7,27 @@ import os
 import sys
 import networkx as nx
 import matplotlib.pyplot as plt
+from matplotlib.patches import Patch  # For creating legend without Line2D
 import io
 from PIL import Image
 import base64
 import json
 from datetime import datetime, timedelta
+
+# Add project root to path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Configure page
+st.set_page_config(
+    page_title="GovCon Intelligence Dashboard",
+    page_icon="📊",
+    layout="wide"
+)
+
+# API connection settings
+API_URL = os.environ.get("API_URL", "http://api:8000")
+API_KEY = os.environ.get("API_KEY", "dev_key")
+HEADERS = {"X-API-Key": API_KEY}
 
 def get_api_key_expiration():
     try:
@@ -40,28 +56,6 @@ def get_api_key_expiration():
         return {"status": "unknown", "days_left": None, "message": "API Key status unknown"}
     except Exception:
         return {"status": "error", "days_left": None, "message": "Cannot check API Key status"}
-
-# Get key status
-key_status = get_api_key_expiration()
-
-# Display key expiration prominently if needed
-if key_status["status"] in ["expired", "critical", "warning"]:
-    st.warning(key_status["message"], icon="⚠️")
-
-# Add project root to path
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-# Configure page
-st.set_page_config(
-    page_title="GovCon Intelligence Dashboard",
-    page_icon="📊",
-    layout="wide"
-)
-
-# API connection settings
-API_URL = os.environ.get("API_URL", "http://api:8000")
-API_KEY = os.environ.get("API_KEY", "dev_key")
-HEADERS = {"X-API-Key": API_KEY}
 
 # Function to fetch data from API
 def get_search_results(query):
@@ -203,9 +197,6 @@ def get_system_health():
 def create_entity_network(entities):
     G = nx.Graph()
     
-    # Add nodes for each entity type
-    colors = []
-    
     # Define color mapping
     color_map = {
         "TECHNOLOGY": "skyblue",
@@ -216,13 +207,16 @@ def create_entity_network(entities):
         "PERSON": "pink"
     }
     
-    # Add nodes
+    # Add nodes for each entity type
     for entity_type, entity_list in entities.items():
         for entity in entity_list:
             G.add_node(entity["text"], type=entity_type)
     
-    # Assign colors to nodes in the order of G.nodes()
-    colors = [color_map.get(G.nodes[n].get("type", ""), "lightgrey") for n in G.nodes()]
+    # Assign colors to nodes based on their type - create a dictionary mapping node to color
+    node_color_dict = {}
+    for node in G.nodes():
+        node_type = G.nodes[node].get("type", "")
+        node_color_dict[node] = color_map.get(node_type, "lightgrey")
     
     # Add edges between related entities
     added_edges = set()
@@ -250,20 +244,18 @@ def create_entity_network(entities):
     # Create visualization
     plt.figure(figsize=(10, 8))
     pos = nx.spring_layout(G)
-    node_count = len(G.nodes())
-    node_colors = colors if len(colors) == node_count else ["lightgray"] * node_count
-    if len(node_colors) == len(G.nodes()):
-        nx.draw_networkx_nodes(G, pos, nodelist=list(G.nodes()), node_color=node_colors, node_size=500, alpha=0.8)
-    else:
-        nx.draw_networkx_nodes(G, pos, nodelist=list(G.nodes()), node_color=["lightgray"] * len(G.nodes()), node_size=500, alpha=0.8)
+    
+    # Use a single color to avoid version issues with NetworkX
+    nx.draw_networkx_nodes(G, pos, node_color="lightgrey", node_size=500, alpha=0.8)
+    
     nx.draw_networkx_edges(G, pos, width=1, alpha=0.5)
     nx.draw_networkx_labels(G, pos, font_size=10)
     
-    # Add legend
-    legend_elements = [plt.Line2D([0], [0], marker='o', color='w', 
-                               label=f"{entity_type}",
-                               markerfacecolor=color, markersize=10)
-                    for entity_type, color in color_map.items()]
+    # Add legend using Patch instead of Line2D
+    legend_elements = []
+    for entity_type, color in color_map.items():
+        legend_elements.append(Patch(facecolor=color, edgecolor='black',
+                                   label=entity_type, alpha=0.8))
     plt.legend(handles=legend_elements, loc='upper left')
     
     plt.title("Entity Relationship Network")
@@ -277,6 +269,9 @@ def create_entity_network(entities):
     
     return img
 
+# Get key status - moved after API_URL and HEADERS are defined
+key_status = get_api_key_expiration()
+
 # Sidebar navigation
 st.sidebar.title("Navigation")
 page = st.sidebar.radio(
@@ -284,7 +279,7 @@ page = st.sidebar.radio(
     ["Overview", "Search Opportunities", "Competitor Analysis", "Entity Analysis", "Data Sources"]
 )
 
-#side bar api key warning
+# Side bar api key warning
 st.sidebar.write("### API Key Status")
 if key_status["days_left"] is not None:
     if key_status["status"] == "expired":
@@ -311,6 +306,10 @@ if api_key_status and "sam_gov" in api_key_status:
     sam_gov_status = api_key_status["sam_gov"]
     if sam_gov_status.get("requires_update"):
         st.sidebar.warning(f"⚠️ SAM.gov API key needs rotation ({sam_gov_status.get('days_old', '?')} days old)")
+
+# Display key expiration prominently if needed - only show at the top, not duplicated
+if key_status["status"] in ["expired", "critical", "warning"]:
+    st.warning(key_status["message"], icon="⚠️")
 
 # Overview page
 if page == "Overview":
@@ -356,7 +355,10 @@ if page == "Overview":
             
             if result.get("status") == "success":
                 source_results = result.get("sources", {})
-                collected_items = [f"{source}: {count} items" for source, count in source_results.items()]
+                if isinstance(source_results, dict):
+                    collected_items = [f"{source}: {count} items" for source, count in source_results.items()]
+                else:
+                    collected_items = ["No detailed breakdown available"]
                 
                 st.success(f"Successfully collected data:\n" + "\n".join(collected_items))
                 st.write(f"Total collected: {result.get('total_collected')}")
@@ -720,9 +722,15 @@ elif page == "Data Sources":
     
     # Create a table of sources
     source_table = []
+    
+    # Get all source details in a single request (optimization)
+    source_details = {}
+    for source in sources:
+        source_details[source["id"]] = get_source_details(source["id"])
+    
     for source in sources:
         # Get detailed information for each source
-        details = get_source_details(source["id"])
+        details = source_details.get(source["id"], {})
         
         # Add status indicator
         status_color = "🟢" if details.get("status") == "active" else "🔴"
@@ -756,7 +764,7 @@ elif page == "Data Sources":
             st.write(f"### {source['name']} Configuration")
             
             # Get source details
-            details = get_source_details(source["id"])
+            details = source_details.get(source["id"], {})
             
             # Show source-specific information
             if source["id"] == "sam.gov":

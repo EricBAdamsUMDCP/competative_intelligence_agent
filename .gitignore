@@ -209,3 +209,6 @@ docker-compose.yml
 # OS cruft
 .DS_Store
 Thumbs.db
+
+#venv
+venv*

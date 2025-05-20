@@ -3,7 +3,7 @@ import aiohttp
 from bs4 import BeautifulSoup
 import asyncio
 from datetime import datetime, timedelta
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 import os
 import logging
 import time
@@ -17,7 +17,7 @@ class NewsCollector(BaseCollector):
     last_request_time = 0
     min_request_interval = 2.0  # Min 2 seconds between requests to be polite
     
-    def __init__(self, source_name: str = "industry_news", config: Dict[str, Any] = None):
+    def __init__(self, source_name: str = "industry_news", config: Optional[Dict[str, Any]] = None):
         default_config = {
             'sources': [
                 {
@@ -105,10 +105,12 @@ class NewsCollector(BaseCollector):
                         
                         # Get link if available
                         link = None
-                        if title_element and title_element.find('a'):
-                            link = title_element.find('a').get('href')
-                            # Make sure it's an absolute URL
-                            if link and not (link.startswith('http://') or link.startswith('https://')):
+                        a_tag = title_element.find('a') if title_element else None
+                        from bs4 import Tag
+                        if a_tag and isinstance(a_tag, Tag):
+                            link = a_tag.get('href')
+                            # Ensure link is a string before using string methods
+                            if isinstance(link, str) and link and not (link.startswith('http://') or link.startswith('https://')):
                                 if link.startswith('/'):
                                     # Extract domain from the source URL
                                     parts = source_config['url'].split('/')

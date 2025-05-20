@@ -1,12 +1,14 @@
 # app/api.py
-from fastapi import FastAPI, Depends, HTTPException, Security
+from fastapi import FastAPI, Depends, HTTPException, Security, Query as FastAPIQuery
 from fastapi.security import APIKeyHeader
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 import os
 import sys
 import asyncio
 import logging
+from datetime import datetime, timedelta
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -28,9 +30,22 @@ app = FastAPI(
     version="0.1.0"
 )
 
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Adjust in production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # Security
 API_KEY = os.environ.get("API_KEY", "dev_key")
 api_key_header = APIKeyHeader(name="X-API-Key")
+
+# SAM.gov API key tracking
+SAM_GOV_API_KEY = os.environ.get("SAM_GOV_API_KEY", "")
+SAM_GOV_API_KEY_CREATED = os.environ.get("SAM_GOV_API_KEY_CREATED", "")
 
 # Initialize the entity extractor as a global variable
 entity_extractor = None
@@ -68,6 +83,18 @@ async def startup_event():
     logger.info("Initializing entity extractor...")
     entity_extractor = EntityExtractor()
     logger.info("Entity extractor initialized")
+    
+    # Check API key age if environment variable exists
+    if SAM_GOV_API_KEY_CREATED:
+        try:
+            created_date = datetime.fromisoformat(SAM_GOV_API_KEY_CREATED)
+            days_old = (datetime.now() - created_date).days
+            if days_old > 80:  # Warn when approaching 90 days
+                logger.warning(f"SAM.gov API key is {days_old} days old. Keys must be rotated every 90 days.")
+            elif days_old > 90:
+                logger.error(f"SAM.gov API key is {days_old} days old and has expired. Please rotate your key immediately.")
+        except ValueError:
+            logger.warning("Could not parse SAM_GOV_API_KEY_CREATED date. Please use ISO format (YYYY-MM-DD).")
 
 # Routes
 @app.get("/")
@@ -80,7 +107,40 @@ def read_root():
 
 @app.get("/health")
 def health_check():
-    return {"status": "healthy"}
+    """System health check endpoint"""
+    # Check API key status
+    api_key_status = "unknown"
+    api_key_days = None
+    
+    if SAM_GOV_API_KEY_CREATED:
+        try:
+            created_date = datetime.fromisoformat(SAM_GOV_API_KEY_CREATED)
+            days_old = (datetime.now() - created_date).days
+            api_key_days = days_old
+            
+            if days_old > 90:
+                api_key_status = "expired"
+            elif days_old > 80:
+                api_key_status = "warning"
+            else:
+                api_key_status = "valid"
+        except ValueError:
+            api_key_status = "invalid_date"
+    
+    return {
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "components": {
+            "api": "operational",
+            "knowledge_graph": "operational",
+            "entity_extractor": "operational" if entity_extractor is not None else "not_initialized"
+        },
+        "sam_gov_api_key": {
+            "status": api_key_status,
+            "days_old": api_key_days,
+            "present": bool(SAM_GOV_API_KEY)
+        }
+    }
 
 @app.post("/search")
 def search(query: Query, graph: KnowledgeGraph = Depends(get_knowledge_graph), api_key: str = Depends(get_api_key)):
@@ -92,8 +152,13 @@ def search(query: Query, graph: KnowledgeGraph = Depends(get_knowledge_graph), a
         logger.error(f"Search error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Search error: {str(e)}")
 
+from typing import Annotated
+
 @app.get("/collect")
-async def collect_data(sources: str = None, api_key: str = Depends(get_api_key)):
+async def collect_data(
+    sources: Annotated[Optional[str], FastAPIQuery(default=None, description="Comma-separated list of sources to collect from")],
+    api_key: str = Depends(get_api_key)
+):
     """Manually trigger data collection from specified sources or all sources"""
     global entity_extractor
     
@@ -289,7 +354,13 @@ def get_source_data(source_id: str, api_key: str = Depends(get_api_key)):
             "data_types": ["opportunities", "awards", "entities"],
             "last_updated": None,
             "item_count": 0,
-            "status": "active"
+            "status": "active",
+            "terms_of_use": "Data provided by SAM.gov is subject to specific terms of use. By using this system, you agree to only access data you are authorized to access, not use the data for unauthorized purposes, not share your API key with unauthorized parties, and update your API key every 90 days.",
+            "api_key_status": {
+                "present": bool(SAM_GOV_API_KEY),
+                "created": SAM_GOV_API_KEY_CREATED,
+                "requires_update": False
+            }
         },
         "usaspending.gov": {
             "id": "usaspending.gov",
@@ -316,4 +387,49 @@ def get_source_data(source_id: str, api_key: str = Depends(get_api_key)):
     if source_id not in sources:
         raise HTTPException(status_code=404, detail=f"Source {source_id} not found")
     
+    # Add API key status for SAM.gov
+    if source_id == "sam.gov" and SAM_GOV_API_KEY_CREATED:
+        try:
+            created_date = datetime.fromisoformat(SAM_GOV_API_KEY_CREATED)
+            days_old = (datetime.now() - created_date).days
+            sources[source_id]["api_key_status"]["days_old"] = days_old
+            sources[source_id]["api_key_status"]["requires_update"] = days_old > 80
+        except ValueError:
+            pass
+    
     return sources[source_id]
+
+@app.get("/api-key-status")
+def check_api_key_status(api_key: str = Depends(get_api_key)):
+    """Check the status of API keys"""
+    result = {
+        "sam_gov": {
+            "key_present": bool(SAM_GOV_API_KEY),
+            "created_date": None,
+            "days_old": None,
+            "status": "unknown",
+            "requires_update": False
+        }
+    }
+    
+    if SAM_GOV_API_KEY_CREATED:
+        try:
+            created_date = datetime.fromisoformat(SAM_GOV_API_KEY_CREATED)
+            days_old = (datetime.now() - created_date).days
+            
+            result["sam_gov"]["created_date"] = SAM_GOV_API_KEY_CREATED
+            result["sam_gov"]["days_old"] = days_old
+            
+            if days_old > 90:
+                result["sam_gov"]["status"] = "expired"
+                result["sam_gov"]["requires_update"] = True
+            elif days_old > 80:
+                result["sam_gov"]["status"] = "warning"
+                result["sam_gov"]["requires_update"] = True
+            else:
+                result["sam_gov"]["status"] = "valid"
+                result["sam_gov"]["requires_update"] = False
+        except ValueError:
+            result["sam_gov"]["status"] = "invalid_date_format"
+    
+    return result
