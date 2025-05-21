@@ -1,15 +1,14 @@
-# Updated API code to integrate new collectors
 # app/api.py
-
-from fastapi import FastAPI, Depends, HTTPException, Security, BackgroundTasks, Query
+from fastapi import FastAPI, Depends, HTTPException, Security, BackgroundTasks
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 import os
 import sys
+import json
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -20,24 +19,25 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.knowledge.graph_store import KnowledgeGraph
 from core.collectors.sam_gov import SamGovCollector
-from core.collectors.usaspending_gov import USASpendingCollector
 from core.processors.entity_extractor import EntityExtractor
-from core.processors.data_normalizer import DataNormalizer
+from core.agents.manager import AgentManager
 
 # Initialize API
 app = FastAPI(
     title="GovCon Intelligence API",
     description="API for the Government Contracting Competitive Intelligence System",
-    version="1.0.0"
+    version="0.2.0"
 )
 
 # Security
 API_KEY = os.environ.get("API_KEY", "dev_key")
 api_key_header = APIKeyHeader(name="X-API-Key")
 
-# Initialize global components
+# Initialize the entity extractor as a global variable
 entity_extractor = None
-data_normalizer = None
+
+# Initialize the agent manager as a global variable
+agent_manager = None
 
 def get_api_key(api_key: str = Security(api_key_header)):
     if api_key != API_KEY:
@@ -52,15 +52,19 @@ def get_knowledge_graph():
     finally:
         graph.close()
 
+# Agent manager instance
+def get_agent_manager():
+    global agent_manager
+    if not agent_manager:
+        # Initialize agent manager with config file
+        config_path = os.path.join("data", "agent_config.json")
+        agent_manager = AgentManager(config_path=config_path if os.path.exists(config_path) else None)
+    return agent_manager
+
 # Models
 class Query(BaseModel):
     query: str
     filters: Optional[Dict[str, Any]] = None
-
-class CollectionParams(BaseModel):
-    sources: List[str] = ["sam.gov", "usaspending.gov"]
-    days: int = 30
-    limit: int = 100
 
 class SearchResult(BaseModel):
     id: str
@@ -69,27 +73,56 @@ class SearchResult(BaseModel):
     score: float
     data: Dict[str, Any]
 
+class OpportunityAnalysisRequest(BaseModel):
+    opportunity_id: Optional[str] = None
+    title: str
+    agency: str
+    value: float
+    description: str
+    additional_info: Optional[str] = None
+
+class CompetitorAnalysisRequest(BaseModel):
+    competitor_id: str
+    include_technologies: Optional[bool] = True
+    include_agencies: Optional[bool] = True
+
+class BidDecisionFeedbackRequest(BaseModel):
+    opportunity_id: str
+    bid_decision: bool
+    win_result: Optional[bool] = None
+    feedback_notes: Optional[str] = None
+
+class WorkflowRequest(BaseModel):
+    workflow_type: str
+    params: Dict[str, Any]
+
+class MarketIntelligenceRequest(BaseModel):
+    agency_id: Optional[str] = None
+    technology: Optional[str] = None
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+
 # Startup event
 @app.on_event("startup")
 async def startup_event():
     """Initialize components on startup"""
-    global entity_extractor, data_normalizer
+    global entity_extractor, agent_manager
     
     logger.info("Initializing entity extractor...")
     entity_extractor = EntityExtractor()
     logger.info("Entity extractor initialized")
     
-    logger.info("Initializing data normalizer...")
-    data_normalizer = DataNormalizer()
-    logger.info("Data normalizer initialized")
+    logger.info("Initializing agent manager...")
+    agent_manager = get_agent_manager()
+    logger.info("Agent manager initialized")
 
 # Routes
 @app.get("/")
 def read_root():
     return {
         "status": "operational",
-        "system": "Government Contracting Intelligence System",
-        "version": "1.0.0"
+        "system": "Government Contracting Competitive Intelligence System",
+        "version": "0.2.0"
     }
 
 @app.get("/health")
@@ -100,195 +133,35 @@ def health_check():
 def search(query: Query, graph: KnowledgeGraph = Depends(get_knowledge_graph), api_key: str = Depends(get_api_key)):
     """Search the knowledge graph"""
     try:
-        # Apply filters if provided
-        filter_params = {}
-        if query.filters:
-            if 'agency' in query.filters:
-                filter_params['agency'] = query.filters['agency']
-            if 'min_value' in query.filters:
-                filter_params['min_value'] = query.filters['min_value']
-            if 'max_value' in query.filters:
-                filter_params['max_value'] = query.filters['max_value']
-            if 'date_from' in query.filters:
-                filter_params['date_from'] = query.filters['date_from']
-            if 'date_to' in query.filters:
-                filter_params['date_to'] = query.filters['date_to']
-        
-        results = graph.search_opportunities(query.query, filters=filter_params)
+        results = graph.search_opportunities(query.query)
         return results
     except Exception as e:
         logger.error(f"Search error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Search error: {str(e)}")
 
-@app.post("/collect")
-async def collect_data(
-    params: Optional[CollectionParams] = None,
-    background_tasks: BackgroundTasks = None,
-    api_key: str = Depends(get_api_key)
-):
-    """Manually trigger data collection"""
-    global entity_extractor, data_normalizer
-    
-    # Use default params if not provided
-    if not params:
-        params = CollectionParams()
-    
-    # Start date for collection
-    start_date = datetime.now() - timedelta(days=params.days)
-    
-    # If background tasks is provided, run collection in background
-    if background_tasks:
-        background_tasks.add_task(
-            _run_data_collection, 
-            params.sources, 
-            start_date, 
-            params.limit,
-            entity_extractor,
-            data_normalizer
-        )
-        return {
-            "status": "initiated",
-            "message": f"Data collection started in background for sources: {', '.join(params.sources)}",
-            "params": {
-                "days": params.days,
-                "limit": params.limit
-            }
-        }
-    
-    # Otherwise run synchronously
+@app.get("/collect")
+async def collect_data(api_key: str = Depends(get_api_key), manager: AgentManager = Depends(get_agent_manager)):
+    """Manually trigger data collection using the agent system"""
     try:
-        result = await _run_data_collection(
-            params.sources, 
-            start_date, 
-            params.limit,
-            entity_extractor,
-            data_normalizer
-        )
-        return result
-    except Exception as e:
-        logger.error(f"Collection error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Collection error: {str(e)}")
-
-async def _run_data_collection(
-    sources: List[str], 
-    start_date: datetime,
-    limit: int,
-    entity_extractor,
-    data_normalizer
-) -> Dict[str, Any]:
-    """Run data collection from specified sources"""
-    all_results = []
-    processed_results = []
-    collection_stats = {}
-    
-    # Create date strings in different formats for different APIs
-    iso_date = start_date.isoformat()
-    sam_date = start_date.strftime("%m/%d/%Y")
-    
-    # Collect from each source
-    for source in sources:
-        try:
-            if source.lower() == "sam.gov":
-                # Initialize SAM.gov collector with date range
-                collector = SamGovCollector(config={
-                    'published_since': iso_date,
-                    'posted_date_start': sam_date,
-                    'posted_date_end': datetime.now().strftime("%m/%d/%Y"),
-                    'limit': limit
-                })
-                
-                # Run collection
-                source_results = await collector.run()
-                
-                collection_stats["sam.gov"] = {
-                    "collected": len(source_results)
-                }
-                
-                all_results.extend(source_results)
-                
-            elif source.lower() == "usaspending.gov":
-                # Initialize USASpending collector with date range
-                collector = USASpendingCollector(config={
-                    'time_period': {
-                        'start_date': start_date.strftime('%Y-%m-%d'),
-                        'end_date': datetime.now().strftime('%Y-%m-%d')
-                    },
-                    'limit': limit
-                })
-                
-                # Run collection
-                source_results = await collector.run()
-                
-                collection_stats["usaspending.gov"] = {
-                    "collected": len(source_results)
-                }
-                
-                all_results.extend(source_results)
-            
-            # Add additional collectors here
-            
-        except Exception as e:
-            logger.error(f"Error collecting from {source}: {str(e)}")
-            collection_stats[source] = {
-                "error": str(e)
+        logger.info("Starting data collection workflow")
+        
+        # Run the data collection workflow
+        result = await manager.run_workflow(
+            workflow_type="data_collection",
+            params={
+                "id": f"manual_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+                "collector_type": "core.collectors.sam_gov.SamGovCollector"
             }
-    
-    logger.info(f"Collected {len(all_results)} total items from all sources")
-    
-    # Process entities and normalize data
-    for item in all_results:
-        try:
-            # Extract entities
-            if entity_extractor:
-                item = entity_extractor.process_document(item)
-            
-            # Normalize data
-            if data_normalizer and 'source' in item:
-                item = data_normalizer.normalize(item, item['source'])
-            
-            processed_results.append(item)
-        except Exception as e:
-            logger.error(f"Error processing item: {str(e)}")
-    
-    # Store in knowledge graph
-    graph = KnowledgeGraph()
-    
-    try:
-        stored_count = 0
-        for item in processed_results:
-            try:
-                if 'award_data' in item:
-                    # Add extracted entities to award data if present
-                    if 'extracted_entities' in item:
-                        item['award_data']['extracted_entities'] = item['extracted_entities']
-                    if 'entity_summary' in item:
-                        item['award_data']['entity_summary'] = item['entity_summary']
-                    
-                    graph.add_contract_award(item['award_data'])
-                    stored_count += 1
-            except Exception as e:
-                logger.error(f"Error storing item in knowledge graph: {str(e)}")
+        )
         
         return {
             "status": "success",
-            "collected": len(all_results),
-            "processed": len(processed_results),
-            "stored": stored_count,
-            "source_stats": collection_stats
+            "workflow_id": result.get("workflow_id"),
+            "results": result.get("results", {})
         }
-    finally:
-        graph.close()
-
-@app.get("/collection/status")
-async def collection_status(task_id: str, api_key: str = Depends(get_api_key)):
-    """Get status of a background collection task"""
-    # In a production system, this would check a task queue or database
-    # For now, return a placeholder
-    return {
-        "task_id": task_id,
-        "status": "completed",
-        "message": "Collection task completed successfully"
-    }
+    except Exception as e:
+        logger.error(f"Collection error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Collection error: {str(e)}")
 
 @app.post("/extract-entities")
 async def extract_entities(request: Dict[str, Any], api_key: str = Depends(get_api_key)):
@@ -318,8 +191,13 @@ async def extract_entities(request: Dict[str, Any], api_key: str = Depends(get_a
 def list_competitors(graph: KnowledgeGraph = Depends(get_knowledge_graph), api_key: str = Depends(get_api_key)):
     """List all competitors in the knowledge graph"""
     try:
-        competitors = graph.get_competitors()
-        return competitors
+        # This would normally query the knowledge graph
+        # Placeholder implementation
+        return [
+            {"id": "comp1", "name": "TechGov Solutions", "contract_count": 25},
+            {"id": "comp2", "name": "Federal Systems Inc", "contract_count": 18},
+            {"id": "comp3", "name": "Government IT Partners", "contract_count": 12}
+        ]
     except Exception as e:
         logger.error(f"Competitor listing error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Competitor listing error: {str(e)}")
@@ -328,89 +206,304 @@ def list_competitors(graph: KnowledgeGraph = Depends(get_knowledge_graph), api_k
 def list_agencies(graph: KnowledgeGraph = Depends(get_knowledge_graph), api_key: str = Depends(get_api_key)):
     """List all agencies in the knowledge graph"""
     try:
-        agencies = graph.get_agencies()
-        return agencies
+        # This would normally query the knowledge graph
+        # Placeholder implementation
+        return [
+            {"id": "agency1", "name": "Department of Defense", "total_spend": 25000000000},
+            {"id": "agency2", "name": "Department of Health & Human Services", "total_spend": 15000000000},
+            {"id": "agency3", "name": "General Services Administration", "total_spend": 8000000000}
+        ]
     except Exception as e:
         logger.error(f"Agency listing error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Agency listing error: {str(e)}")
 
 @app.get("/entity-stats")
-def get_entity_statistics(
-    entity_type: Optional[str] = None,
-    graph: KnowledgeGraph = Depends(get_knowledge_graph),
-    api_key: str = Depends(get_api_key)
-):
+def get_entity_statistics(graph: KnowledgeGraph = Depends(get_knowledge_graph), api_key: str = Depends(get_api_key)):
     """Get statistics on extracted entities"""
     try:
-        stats = graph.get_entity_statistics(entity_type)
-        return stats
-    except Exception as e:
-        logger.error(f"Entity statistics error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Entity statistics error: {str(e)}")
-
-@app.get("/sources")
-def list_data_sources(api_key: str = Depends(get_api_key)):
-    """List available data sources"""
-    return {
-        "sources": [
-            {
-                "id": "sam.gov",
-                "name": "SAM.gov",
-                "description": "Federal contract opportunities and awards",
-                "enabled": True
-            },
-            {
-                "id": "usaspending.gov",
-                "name": "USASpending.gov",
-                "description": "Federal spending data including contract transactions",
-                "enabled": True
-            }
-            # Add more sources as they are implemented
-        ]
-    }
-
-@app.get("/data-insights")
-def get_data_insights(
-    days: int = Query(90, description="Number of days to analyze"),
-    graph: KnowledgeGraph = Depends(get_knowledge_graph),
-    api_key: str = Depends(get_api_key)
-):
-    """Get insights from collected data"""
-    try:
-        # This would call a more advanced analysis method in the knowledge graph
-        # For now, return a placeholder
+        # This would normally query the knowledge graph
+        # Placeholder implementation
         return {
-            "time_period": f"Last {days} days",
-            "top_agencies": [
-                {"name": "Department of Defense", "contract_count": 42, "total_value": 4200000000},
-                {"name": "Department of Health and Human Services", "contract_count": 28, "total_value": 1800000000},
-                {"name": "General Services Administration", "contract_count": 15, "total_value": 950000000}
-            ],
-            "top_contractors": [
-                {"name": "TechDefense Solutions", "contract_count": 12, "total_value": 750000000},
-                {"name": "Federal Systems Inc", "contract_count": 8, "total_value": 520000000},
-                {"name": "CloudTech Services", "contract_count": 7, "total_value": 480000000}
-            ],
-            "top_technologies": [
-                {"name": "cloud", "contract_count": 35},
-                {"name": "cybersecurity", "contract_count": 28},
-                {"name": "artificial intelligence", "contract_count": 15}
-            ],
-            "trends": {
-                "fastest_growing_agencies": [
-                    {"name": "Department of Energy", "growth_rate": 0.28},
-                    {"name": "Department of Homeland Security", "growth_rate": 0.22}
-                ],
-                "fastest_growing_technologies": [
-                    {"name": "zero trust", "growth_rate": 0.45},
-                    {"name": "quantum", "growth_rate": 0.35}
+            "technology": {
+                "total_count": 45,
+                "top_entities": [
+                    {"name": "cloud", "count": 12},
+                    {"name": "cybersecurity", "count": 10},
+                    {"name": "artificial intelligence", "count": 8}
+                ]
+            },
+            "regulation": {
+                "total_count": 30,
+                "top_entities": [
+                    {"name": "NIST", "count": 15},
+                    {"name": "CMMC", "count": 8},
+                    {"name": "FedRAMP", "count": 7}
+                ]
+            },
+            "clearance": {
+                "total_count": 20,
+                "top_entities": [
+                    {"name": "Top Secret", "count": 10},
+                    {"name": "Secret", "count": 8},
+                    {"name": "Public Trust", "count": 2}
                 ]
             }
         }
     except Exception as e:
-        logger.error(f"Data insights error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Data insights error: {str(e)}")
+        logger.error(f"Entity statistics error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Entity statistics error: {str(e)}")
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+# New agent-based endpoints
+
+@app.post("/analyze-opportunity")
+async def analyze_opportunity(
+    request: OpportunityAnalysisRequest, 
+    api_key: str = Depends(get_api_key),
+    manager: AgentManager = Depends(get_agent_manager)
+):
+    """Analyze an opportunity using the agent system"""
+    try:
+        logger.info(f"Starting opportunity analysis workflow for: {request.title}")
+        
+        # Prepare opportunity data
+        opportunity_data = {
+            "id": request.opportunity_id or f"opp_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+            "title": request.title,
+            "agency": request.agency,
+            "value": request.value,
+            "description": request.description,
+            "additional_info": request.additional_info or ""
+        }
+        
+        # Run the opportunity analysis workflow
+        result = await manager.run_workflow(
+            workflow_type="opportunity_analysis",
+            params={
+                "id": opportunity_data["id"],
+                "opportunity_data": opportunity_data
+            }
+        )
+        
+        return {
+            "status": "success",
+            "opportunity_id": opportunity_data["id"],
+            "workflow_id": result.get("workflow_id"),
+            "analysis": result.get("results", {}).get("bid_result", {})
+        }
+    except Exception as e:
+        logger.error(f"Opportunity analysis error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Opportunity analysis error: {str(e)}")
+
+@app.post("/analyze-competitor")
+async def analyze_competitor(
+    request: CompetitorAnalysisRequest, 
+    api_key: str = Depends(get_api_key),
+    manager: AgentManager = Depends(get_agent_manager)
+):
+    """Analyze a competitor using the agent system"""
+    try:
+        logger.info(f"Starting competitor analysis workflow for: {request.competitor_id}")
+        
+        # Run the competitor analysis workflow
+        result = await manager.run_workflow(
+            workflow_type="competitor_analysis",
+            params={
+                "id": request.competitor_id,
+                "competitor_id": request.competitor_id,
+                "include_technologies": request.include_technologies,
+                "include_agencies": request.include_agencies
+            }
+        )
+        
+        return {
+            "status": "success",
+            "competitor_id": request.competitor_id,
+            "workflow_id": result.get("workflow_id"),
+            "analysis": {
+                "competitor_data": result.get("results", {}).get("competitor_data", {}),
+                "technology_data": result.get("results", {}).get("technology_data", {}) if request.include_technologies else None,
+                "insights": result.get("results", {}).get("insights", {})
+            }
+        }
+    except Exception as e:
+        logger.error(f"Competitor analysis error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Competitor analysis error: {str(e)}")
+
+@app.post("/bid-feedback")
+async def record_bid_feedback(
+    request: BidDecisionFeedbackRequest, 
+    api_key: str = Depends(get_api_key),
+    manager: AgentManager = Depends(get_agent_manager)
+):
+    """Record feedback on a bid decision"""
+    try:
+        logger.info(f"Recording bid feedback for opportunity: {request.opportunity_id}")
+        
+        # Run the bid decision feedback workflow
+        result = await manager.run_workflow(
+            workflow_type="bid_decision_feedback",
+            params={
+                "id": f"feedback_{request.opportunity_id}",
+                "opportunity_id": request.opportunity_id,
+                "bid_decision": request.bid_decision,
+                "win_result": request.win_result,
+                "feedback_notes": request.feedback_notes or ""
+            }
+        )
+        
+        return {
+            "status": "success",
+            "opportunity_id": request.opportunity_id,
+            "workflow_id": result.get("workflow_id"),
+            "feedback_id": result.get("results", {}).get("feedback_result", {}).get("feedback_id")
+        }
+    except Exception as e:
+        logger.error(f"Bid feedback error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Bid feedback error: {str(e)}")
+
+@app.post("/market-intelligence")
+async def get_market_intelligence(
+    request: MarketIntelligenceRequest, 
+    api_key: str = Depends(get_api_key),
+    manager: AgentManager = Depends(get_agent_manager)
+):
+    """Get market intelligence using the agent system"""
+    try:
+        logger.info("Starting market intelligence workflow")
+        
+        # Prepare time period if provided
+        time_period = None
+        if request.start_date or request.end_date:
+            time_period = {}
+            if request.start_date:
+                time_period["start_date"] = request.start_date
+            if request.end_date:
+                time_period["end_date"] = request.end_date
+        
+        # Run the market intelligence workflow
+        result = await manager.run_workflow(
+            workflow_type="market_intelligence",
+            params={
+                "id": f"market_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+                "agency_id": request.agency_id,
+                "technology": request.technology,
+                "time_period": time_period
+            }
+        )
+        
+        return {
+            "status": "success",
+            "workflow_id": result.get("workflow_id"),
+            "intelligence": {
+                "agency_data": result.get("results", {}).get("agency_data", {}),
+                "technology_data": result.get("results", {}).get("technology_data", {}),
+                "agency_insights": result.get("results", {}).get("agency_insights", {}),
+                "technology_insights": result.get("results", {}).get("technology_insights", {}),
+                "success_factors": result.get("results", {}).get("success_factors", {})
+            }
+        }
+    except Exception as e:
+        logger.error(f"Market intelligence error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Market intelligence error: {str(e)}")
+
+@app.post("/run-workflow")
+async def run_workflow(
+    request: WorkflowRequest, 
+    api_key: str = Depends(get_api_key),
+    manager: AgentManager = Depends(get_agent_manager)
+):
+    """Run a custom workflow"""
+    try:
+        logger.info(f"Starting custom workflow: {request.workflow_type}")
+        
+        # Run the workflow
+        result = await manager.run_workflow(
+            workflow_type=request.workflow_type,
+            params=request.params
+        )
+        
+        return {
+            "status": "success",
+            "workflow_type": request.workflow_type,
+            "workflow_id": result.get("workflow_id"),
+            "results": result.get("results", {})
+        }
+    except Exception as e:
+        logger.error(f"Workflow error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Workflow error: {str(e)}")
+
+@app.get("/workflow-state/{workflow_id}")
+def get_workflow_state(
+    workflow_id: str, 
+    api_key: str = Depends(get_api_key),
+    manager: AgentManager = Depends(get_agent_manager)
+):
+    """Get the current state of a workflow"""
+    try:
+        logger.info(f"Getting state for workflow: {workflow_id}")
+        
+        state = manager.get_workflow_state(workflow_id)
+        if not state:
+            raise HTTPException(status_code=404, detail=f"Workflow {workflow_id} not found")
+        
+        return {
+            "status": "success",
+            "workflow_id": workflow_id,
+            "state": state
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Workflow state error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Workflow state error: {str(e)}")
+
+@app.get("/agents")
+def list_agents(
+    api_key: str = Depends(get_api_key),
+    manager: AgentManager = Depends(get_agent_manager)
+):
+    """List all agents in the system"""
+    try:
+        logger.info("Listing all agents")
+        
+        states = manager.get_agent_states()
+        
+        return {
+            "status": "success",
+            "agent_count": len(states),
+            "agents": states
+        }
+    except Exception as e:
+        logger.error(f"Agent listing error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Agent listing error: {str(e)}")
+
+@app.post("/agents/{agent_id}/run")
+async def run_agent(
+    agent_id: str,
+    params: Dict[str, Any],
+    api_key: str = Depends(get_api_key),
+    manager: AgentManager = Depends(get_agent_manager)
+):
+    """Run a specific agent with given parameters"""
+    try:
+        logger.info(f"Running agent: {agent_id}")
+        
+        # Check if agent exists
+        agent = manager.get_agent(agent_id)
+        if not agent:
+            raise HTTPException(status_code=404, detail=f"Agent {agent_id} not found")
+        
+        # Run the agent
+        result = await manager.run_agent(agent_id, params)
+        
+        return {
+            "status": "success",
+            "agent_id": agent_id,
+            "task_id": result.get("task_id"),
+            "results": result.get("results", {})
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Agent execution error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Agent execution error: {str(e)}")
