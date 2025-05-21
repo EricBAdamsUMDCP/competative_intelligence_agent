@@ -212,3 +212,6 @@ Thumbs.db
 
 #venv
 venv*
+
+#models
+*custom_ner*

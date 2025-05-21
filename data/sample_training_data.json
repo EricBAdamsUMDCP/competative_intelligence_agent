@@ -1,0 +1,417 @@
+[
+  {
+    "text": "The Department of Defense requires cloud services with FedRAMP compliance and Top Secret clearance.",
+    "entities": [
+      {
+        "start": 4,
+        "end": 26,
+        "label": "AGENCY"
+      },
+      {
+        "start": 37,
+        "end": 42,
+        "label": "TECHNOLOGY"
+      },
+      {
+        "start": 53,
+        "end": 60,
+        "label": "REGULATION"
+      },
+      {
+        "start": 76,
+        "end": 86,
+        "label": "CLEARANCE"
+      }
+    ]
+  },
+  {
+    "text": "NIST 800-53 and CMMC Level 3 are required for all DoD contracts involving cybersecurity services.",
+    "entities": [
+      {
+        "start": 0,
+        "end": 4,
+        "label": "REGULATION"
+      },
+      {
+        "start": 14,
+        "end": 18,
+        "label": "REGULATION"
+      },
+      {
+        "start": 47,
+        "end": 50,
+        "label": "AGENCY"
+      },
+      {
+        "start": 72,
+        "end": 85,
+        "label": "TECHNOLOGY"
+      }
+    ]
+  },
+  {
+    "text": "GSA is seeking IDIQ contractors with experience in artificial intelligence and machine learning technologies.",
+    "entities": [
+      {
+        "start": 0,
+        "end": 3,
+        "label": "AGENCY"
+      },
+      {
+        "start": 13,
+        "end": 17,
+        "label": "CONTRACT_VEHICLE"
+      },
+      {
+        "start": 42,
+        "end": 64,
+        "label": "TECHNOLOGY"
+      },
+      {
+        "start": 69,
+        "end": 84,
+        "label": "TECHNOLOGY"
+      }
+    ]
+  },
+  {
+    "text": "The contract falls under NAICS code 541512 and requires Secret clearance for all personnel.",
+    "entities": [
+      {
+        "start": 28,
+        "end": 34,
+        "label": "NAICS_CODE"
+      },
+      {
+        "start": 47,
+        "end": 53,
+        "label": "CLEARANCE"
+      }
+    ]
+  },
+  {
+    "text": "DHS has announced a new BPA for DevSecOps implementation with FISMA compliance requirements.",
+    "entities": [
+      {
+        "start": 0,
+        "end": 3,
+        "label": "AGENCY"
+      },
+      {
+        "start": 23,
+        "end": 26,
+        "label": "CONTRACT_VEHICLE"
+      },
+      {
+        "start": 31,
+        "end": 40,
+        "label": "TECHNOLOGY"
+      },
+      {
+        "start": 59,
+        "end": 64,
+        "label": "REGULATION"
+      }
+    ]
+  },
+  {
+    "text": "The Department of Health and Human Services (HHS) is modernizing their systems using cloud-based microservices architecture.",
+    "entities": [
+      {
+        "start": 4,
+        "end": 45,
+        "label": "AGENCY"
+      },
+      {
+        "start": 47,
+        "end": 50,
+        "label": "AGENCY"
+      },
+      {
+        "start": 76,
+        "end": 86,
+        "label": "TECHNOLOGY"
+      },
+      {
+        "start": 87,
+        "end": 99,
+        "label": "TECHNOLOGY"
+      }
+    ]
+  },
+  {
+    "text": "This opportunity is subject to FAR 52.219-14 and requires compliance with HIPAA regulations.",
+    "entities": [
+      {
+        "start": 29,
+        "end": 32,
+        "label": "REGULATION"
+      },
+      {
+        "start": 65,
+        "end": 70,
+        "label": "REGULATION"
+      }
+    ]
+  },
+  {
+    "text": "The Alliant GWAC is being used by multiple agencies for 5G infrastructure development.",
+    "entities": [
+      {
+        "start": 4,
+        "end": 11,
+        "label": "CONTRACT_VEHICLE"
+      },
+      {
+        "start": 12,
+        "end": 16,
+        "label": "CONTRACT_VEHICLE"
+      },
+      {
+        "start": 50,
+        "end": 52,
+        "label": "TECHNOLOGY"
+      }
+    ]
+  },
+  {
+    "text": "Personnel with TS/SCI clearance are required for this Department of Defense contract.",
+    "entities": [
+      {
+        "start": 15,
+        "end": 21,
+        "label": "CLEARANCE"
+      },
+      {
+        "start": 50,
+        "end": 72,
+        "label": "AGENCY"
+      }
+    ]
+  },
+  {
+    "text": "The CIO-SP3 vehicle is being used for blockchain technology research by the Department of Treasury.",
+    "entities": [
+      {
+        "start": 4,
+        "end": 11,
+        "label": "CONTRACT_VEHICLE"
+      },
+      {
+        "start": 33,
+        "end": 43,
+        "label": "TECHNOLOGY"
+      },
+      {
+        "start": 62,
+        "end": 85,
+        "label": "AGENCY"
+      }
+    ]
+  },
+  {
+    "text": "Vendors must demonstrate FedRAMP High authorization and experience with zero trust security models.",
+    "entities": [
+      {
+        "start": 23,
+        "end": 30,
+        "label": "REGULATION"
+      },
+      {
+        "start": 58,
+        "end": 68,
+        "label": "TECHNOLOGY"
+      }
+    ]
+  },
+  {
+    "text": "The OASIS contract has been extended by GSA for cloud migration services.",
+    "entities": [
+      {
+        "start": 4,
+        "end": 9,
+        "label": "CONTRACT_VEHICLE"
+      },
+      {
+        "start": 39,
+        "end": 42,
+        "label": "AGENCY"
+      },
+      {
+        "start": 47,
+        "end": 52,
+        "label": "TECHNOLOGY"
+      }
+    ]
+  },
+  {
+    "text": "All contractor personnel must maintain Public Trust clearance and understand NIST cybersecurity frameworks.",
+    "entities": [
+      {
+        "start": 33,
+        "end": 45,
+        "label": "CLEARANCE"
+      },
+      {
+        "start": 61,
+        "end": 65,
+        "label": "REGULATION"
+      },
+      {
+        "start": 66,
+        "end": 79,
+        "label": "TECHNOLOGY"
+      }
+    ]
+  },
+  {
+    "text": "This opportunity is available through the NASA SEWP contract for IoT device management solutions.",
+    "entities": [
+      {
+        "start": 38,
+        "end": 42,
+        "label": "AGENCY"
+      },
+      {
+        "start": 43,
+        "end": 47,
+        "label": "CONTRACT_VEHICLE"
+      },
+      {
+        "start": 61,
+        "end": 64,
+        "label": "TECHNOLOGY"
+      }
+    ]
+  },
+  {
+    "text": "The VA requires ATO certification for all cloud-based healthcare applications.",
+    "entities": [
+      {
+        "start": 4,
+        "end": 6,
+        "label": "AGENCY"
+      },
+      {
+        "start": 16,
+        "end": 19,
+        "label": "REGULATION"
+      },
+      {
+        "start": 39,
+        "end": 49,
+        "label": "TECHNOLOGY"
+      }
+    ]
+  },
+  {
+    "text": "Contractors working on DoD projects must comply with DFAR cybersecurity requirements.",
+    "entities": [
+      {
+        "start": 25,
+        "end": 28,
+        "label": "AGENCY"
+      },
+      {
+        "start": 51,
+        "end": 55,
+        "label": "REGULATION"
+      },
+      {
+        "start": 56,
+        "end": 69,
+        "label": "TECHNOLOGY"
+      }
+    ]
+  },
+  {
+    "text": "GSA Schedule 70 is being used to procure quantum computing research services.",
+    "entities": [
+      {
+        "start": 0,
+        "end": 3,
+        "label": "AGENCY"
+      },
+      {
+        "start": 4,
+        "end": 13,
+        "label": "CONTRACT_VEHICLE"
+      },
+      {
+        "start": 39,
+        "end": 46,
+        "label": "TECHNOLOGY"
+      }
+    ]
+  },
+  {
+    "text": "Confidential clearance is required for this Department of Energy contract related to grid security.",
+    "entities": [
+      {
+        "start": 0,
+        "end": 12,
+        "label": "CLEARANCE"
+      },
+      {
+        "start": 37,
+        "end": 59,
+        "label": "AGENCY"
+      },
+      {
+        "start": 83,
+        "end": 90,
+        "label": "TECHNOLOGY"
+      }
+    ]
+  },
+  {
+    "text": "The contract requires CMMC Level 3 certification and experience with containerization technologies.",
+    "entities": [
+      {
+        "start": 20,
+        "end": 24,
+        "label": "REGULATION"
+      },
+      {
+        "start": 65,
+        "end": 80,
+        "label": "TECHNOLOGY"
+      }
+    ]
+  },
+  {
+    "text": "Department of Labor is seeking BPA vendors with expertise in artificial intelligence for workforce analytics.",
+    "entities": [
+      {
+        "start": 0,
+        "end": 19,
+        "label": "AGENCY"
+      },
+      {
+        "start": 31,
+        "end": 34,
+        "label": "CONTRACT_VEHICLE"
+      },
+      {
+        "start": 58,
+        "end": 80,
+        "label": "TECHNOLOGY"
+      }
+    ]
+  },
+  {
+    "text": "The contract is being competed under NAICS 541330 and requires NIST 800-171 compliance.",
+    "entities": [
+      {
+        "start": 35,
+        "end": 41,
+        "label": "NAICS_CODE"
+      },
+      {
+        "start": 54,
+        "end": 58,
+        "label": "REGULATION"
+      }
+    ]
+  }
+]

@@ -1,7 +1,8 @@
+# Updated API code to integrate new collectors
 # app/api.py
-from fastapi import FastAPI, Depends, HTTPException, Security, Query as FastAPIQuery
+
+from fastapi import FastAPI, Depends, HTTPException, Security, BackgroundTasks, Query
 from fastapi.security import APIKeyHeader
-from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 import os
@@ -19,36 +20,24 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.knowledge.graph_store import KnowledgeGraph
 from core.collectors.sam_gov import SamGovCollector
-from core.collectors.usa_spending import USASpendingCollector
-from core.collectors.news_scraper import NewsCollector
+from core.collectors.usaspending_gov import USASpendingCollector
 from core.processors.entity_extractor import EntityExtractor
+from core.processors.data_normalizer import DataNormalizer
 
 # Initialize API
 app = FastAPI(
     title="GovCon Intelligence API",
     description="API for the Government Contracting Competitive Intelligence System",
-    version="0.1.0"
-)
-
-# Add CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Adjust in production
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    version="1.0.0"
 )
 
 # Security
 API_KEY = os.environ.get("API_KEY", "dev_key")
 api_key_header = APIKeyHeader(name="X-API-Key")
 
-# SAM.gov API key tracking
-SAM_GOV_API_KEY = os.environ.get("SAM_GOV_API_KEY", "")
-SAM_GOV_API_KEY_CREATED = os.environ.get("SAM_GOV_API_KEY_CREATED", "")
-
-# Initialize the entity extractor as a global variable
+# Initialize global components
 entity_extractor = None
+data_normalizer = None
 
 def get_api_key(api_key: str = Security(api_key_header)):
     if api_key != API_KEY:
@@ -68,6 +57,11 @@ class Query(BaseModel):
     query: str
     filters: Optional[Dict[str, Any]] = None
 
+class CollectionParams(BaseModel):
+    sources: List[str] = ["sam.gov", "usaspending.gov"]
+    days: int = 30
+    limit: int = 100
+
 class SearchResult(BaseModel):
     id: str
     title: str
@@ -79,22 +73,15 @@ class SearchResult(BaseModel):
 @app.on_event("startup")
 async def startup_event():
     """Initialize components on startup"""
-    global entity_extractor
+    global entity_extractor, data_normalizer
+    
     logger.info("Initializing entity extractor...")
     entity_extractor = EntityExtractor()
     logger.info("Entity extractor initialized")
     
-    # Check API key age if environment variable exists
-    if SAM_GOV_API_KEY_CREATED:
-        try:
-            created_date = datetime.fromisoformat(SAM_GOV_API_KEY_CREATED)
-            days_old = (datetime.now() - created_date).days
-            if days_old > 80:  # Warn when approaching 90 days
-                logger.warning(f"SAM.gov API key is {days_old} days old. Keys must be rotated every 90 days.")
-            elif days_old > 90:
-                logger.error(f"SAM.gov API key is {days_old} days old and has expired. Please rotate your key immediately.")
-        except ValueError:
-            logger.warning("Could not parse SAM_GOV_API_KEY_CREATED date. Please use ISO format (YYYY-MM-DD).")
+    logger.info("Initializing data normalizer...")
+    data_normalizer = DataNormalizer()
+    logger.info("Data normalizer initialized")
 
 # Routes
 @app.get("/")
@@ -102,126 +89,206 @@ def read_root():
     return {
         "status": "operational",
         "system": "Government Contracting Intelligence System",
-        "version": "0.1.0"
+        "version": "1.0.0"
     }
 
 @app.get("/health")
 def health_check():
-    """System health check endpoint"""
-    # Check API key status
-    api_key_status = "unknown"
-    api_key_days = None
-    
-    if SAM_GOV_API_KEY_CREATED:
-        try:
-            created_date = datetime.fromisoformat(SAM_GOV_API_KEY_CREATED)
-            days_old = (datetime.now() - created_date).days
-            api_key_days = days_old
-            
-            if days_old > 90:
-                api_key_status = "expired"
-            elif days_old > 80:
-                api_key_status = "warning"
-            else:
-                api_key_status = "valid"
-        except ValueError:
-            api_key_status = "invalid_date"
-    
-    return {
-        "status": "healthy",
-        "timestamp": datetime.now().isoformat(),
-        "components": {
-            "api": "operational",
-            "knowledge_graph": "operational",
-            "entity_extractor": "operational" if entity_extractor is not None else "not_initialized"
-        },
-        "sam_gov_api_key": {
-            "status": api_key_status,
-            "days_old": api_key_days,
-            "present": bool(SAM_GOV_API_KEY)
-        }
-    }
+    return {"status": "healthy"}
 
 @app.post("/search")
 def search(query: Query, graph: KnowledgeGraph = Depends(get_knowledge_graph), api_key: str = Depends(get_api_key)):
     """Search the knowledge graph"""
     try:
-        results = graph.search_opportunities(query.query)
+        # Apply filters if provided
+        filter_params = {}
+        if query.filters:
+            if 'agency' in query.filters:
+                filter_params['agency'] = query.filters['agency']
+            if 'min_value' in query.filters:
+                filter_params['min_value'] = query.filters['min_value']
+            if 'max_value' in query.filters:
+                filter_params['max_value'] = query.filters['max_value']
+            if 'date_from' in query.filters:
+                filter_params['date_from'] = query.filters['date_from']
+            if 'date_to' in query.filters:
+                filter_params['date_to'] = query.filters['date_to']
+        
+        results = graph.search_opportunities(query.query, filters=filter_params)
         return results
     except Exception as e:
         logger.error(f"Search error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Search error: {str(e)}")
 
-from typing import Annotated
-
-@app.get("/collect")
+@app.post("/collect")
 async def collect_data(
-    sources: Annotated[Optional[str], FastAPIQuery(default=None, description="Comma-separated list of sources to collect from")],
+    params: Optional[CollectionParams] = None,
+    background_tasks: BackgroundTasks = None,
     api_key: str = Depends(get_api_key)
 ):
-    """Manually trigger data collection from specified sources or all sources"""
-    global entity_extractor
+    """Manually trigger data collection"""
+    global entity_extractor, data_normalizer
     
-    # Determine which sources to collect from
-    source_list = sources.split(",") if sources else ["sam.gov", "usaspending.gov", "industry_news"]
+    # Use default params if not provided
+    if not params:
+        params = CollectionParams()
     
-    results = {}
-    all_items = []
+    # Start date for collection
+    start_date = datetime.now() - timedelta(days=params.days)
     
+    # If background tasks is provided, run collection in background
+    if background_tasks:
+        background_tasks.add_task(
+            _run_data_collection, 
+            params.sources, 
+            start_date, 
+            params.limit,
+            entity_extractor,
+            data_normalizer
+        )
+        return {
+            "status": "initiated",
+            "message": f"Data collection started in background for sources: {', '.join(params.sources)}",
+            "params": {
+                "days": params.days,
+                "limit": params.limit
+            }
+        }
+    
+    # Otherwise run synchronously
     try:
-        # Initialize collectors based on requested sources
-        collectors = []
-        if "sam.gov" in source_list:
-            collectors.append(SamGovCollector())
-        if "usaspending.gov" in source_list:
-            collectors.append(USASpendingCollector())
-        if "industry_news" in source_list:
-            collectors.append(NewsCollector())
-        
-        # Run all collectors
-        for collector in collectors:
-            source_results = await collector.run()
-            results[collector.source_name] = len(source_results)
-            all_items.extend(source_results)
-        
-        logger.info(f"Collected a total of {len(all_items)} items from {len(collectors)} sources")
-        
-        # Process entities
-        processed_results = []
-        for item in all_items:
+        result = await _run_data_collection(
+            params.sources, 
+            start_date, 
+            params.limit,
+            entity_extractor,
+            data_normalizer
+        )
+        return result
+    except Exception as e:
+        logger.error(f"Collection error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Collection error: {str(e)}")
+
+async def _run_data_collection(
+    sources: List[str], 
+    start_date: datetime,
+    limit: int,
+    entity_extractor,
+    data_normalizer
+) -> Dict[str, Any]:
+    """Run data collection from specified sources"""
+    all_results = []
+    processed_results = []
+    collection_stats = {}
+    
+    # Create date strings in different formats for different APIs
+    iso_date = start_date.isoformat()
+    sam_date = start_date.strftime("%m/%d/%Y")
+    
+    # Collect from each source
+    for source in sources:
+        try:
+            if source.lower() == "sam.gov":
+                # Initialize SAM.gov collector with date range
+                collector = SamGovCollector(config={
+                    'published_since': iso_date,
+                    'posted_date_start': sam_date,
+                    'posted_date_end': datetime.now().strftime("%m/%d/%Y"),
+                    'limit': limit
+                })
+                
+                # Run collection
+                source_results = await collector.run()
+                
+                collection_stats["sam.gov"] = {
+                    "collected": len(source_results)
+                }
+                
+                all_results.extend(source_results)
+                
+            elif source.lower() == "usaspending.gov":
+                # Initialize USASpending collector with date range
+                collector = USASpendingCollector(config={
+                    'time_period': {
+                        'start_date': start_date.strftime('%Y-%m-%d'),
+                        'end_date': datetime.now().strftime('%Y-%m-%d')
+                    },
+                    'limit': limit
+                })
+                
+                # Run collection
+                source_results = await collector.run()
+                
+                collection_stats["usaspending.gov"] = {
+                    "collected": len(source_results)
+                }
+                
+                all_results.extend(source_results)
+            
+            # Add additional collectors here
+            
+        except Exception as e:
+            logger.error(f"Error collecting from {source}: {str(e)}")
+            collection_stats[source] = {
+                "error": str(e)
+            }
+    
+    logger.info(f"Collected {len(all_results)} total items from all sources")
+    
+    # Process entities and normalize data
+    for item in all_results:
+        try:
+            # Extract entities
             if entity_extractor:
                 item = entity_extractor.process_document(item)
+            
+            # Normalize data
+            if data_normalizer and 'source' in item:
+                item = data_normalizer.normalize(item, item['source'])
+            
             processed_results.append(item)
-        
-        # Store in knowledge graph
-        graph = KnowledgeGraph()
-        
-        try:
-            count = 0
-            for item in processed_results:
+        except Exception as e:
+            logger.error(f"Error processing item: {str(e)}")
+    
+    # Store in knowledge graph
+    graph = KnowledgeGraph()
+    
+    try:
+        stored_count = 0
+        for item in processed_results:
+            try:
                 if 'award_data' in item:
-                    # Add extracted entities to award data
+                    # Add extracted entities to award data if present
                     if 'extracted_entities' in item:
                         item['award_data']['extracted_entities'] = item['extracted_entities']
                     if 'entity_summary' in item:
                         item['award_data']['entity_summary'] = item['entity_summary']
                     
                     graph.add_contract_award(item['award_data'])
-                    count += 1
-            
-            return {
-                "status": "success",
-                "sources": results,
-                "total_collected": len(all_items),
-                "processed": len(processed_results),
-                "stored": count
-            }
-        finally:
-            graph.close()
-            
-    except Exception as e:
-        logger.error(f"Collection error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Collection error: {str(e)}")
+                    stored_count += 1
+            except Exception as e:
+                logger.error(f"Error storing item in knowledge graph: {str(e)}")
+        
+        return {
+            "status": "success",
+            "collected": len(all_results),
+            "processed": len(processed_results),
+            "stored": stored_count,
+            "source_stats": collection_stats
+        }
+    finally:
+        graph.close()
+
+@app.get("/collection/status")
+async def collection_status(task_id: str, api_key: str = Depends(get_api_key)):
+    """Get status of a background collection task"""
+    # In a production system, this would check a task queue or database
+    # For now, return a placeholder
+    return {
+        "task_id": task_id,
+        "status": "completed",
+        "message": "Collection task completed successfully"
+    }
 
 @app.post("/extract-entities")
 async def extract_entities(request: Dict[str, Any], api_key: str = Depends(get_api_key)):
@@ -251,13 +318,8 @@ async def extract_entities(request: Dict[str, Any], api_key: str = Depends(get_a
 def list_competitors(graph: KnowledgeGraph = Depends(get_knowledge_graph), api_key: str = Depends(get_api_key)):
     """List all competitors in the knowledge graph"""
     try:
-        # This would normally query the knowledge graph
-        # Placeholder implementation
-        return [
-            {"id": "comp1", "name": "TechGov Solutions", "contract_count": 25},
-            {"id": "comp2", "name": "Federal Systems Inc", "contract_count": 18},
-            {"id": "comp3", "name": "Government IT Partners", "contract_count": 12}
-        ]
+        competitors = graph.get_competitors()
+        return competitors
     except Exception as e:
         logger.error(f"Competitor listing error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Competitor listing error: {str(e)}")
@@ -266,170 +328,89 @@ def list_competitors(graph: KnowledgeGraph = Depends(get_knowledge_graph), api_k
 def list_agencies(graph: KnowledgeGraph = Depends(get_knowledge_graph), api_key: str = Depends(get_api_key)):
     """List all agencies in the knowledge graph"""
     try:
-        # This would normally query the knowledge graph
-        # Placeholder implementation
-        return [
-            {"id": "agency1", "name": "Department of Defense", "total_spend": 25000000000},
-            {"id": "agency2", "name": "Department of Health & Human Services", "total_spend": 15000000000},
-            {"id": "agency3", "name": "General Services Administration", "total_spend": 8000000000}
-        ]
+        agencies = graph.get_agencies()
+        return agencies
     except Exception as e:
         logger.error(f"Agency listing error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Agency listing error: {str(e)}")
 
 @app.get("/entity-stats")
-def get_entity_statistics(graph: KnowledgeGraph = Depends(get_knowledge_graph), api_key: str = Depends(get_api_key)):
+def get_entity_statistics(
+    entity_type: Optional[str] = None,
+    graph: KnowledgeGraph = Depends(get_knowledge_graph),
+    api_key: str = Depends(get_api_key)
+):
     """Get statistics on extracted entities"""
     try:
-        # This would normally query the knowledge graph
-        # Placeholder implementation
-        return {
-            "technology": {
-                "total_count": 45,
-                "top_entities": [
-                    {"name": "cloud", "count": 12},
-                    {"name": "cybersecurity", "count": 10},
-                    {"name": "artificial intelligence", "count": 8}
-                ]
-            },
-            "regulation": {
-                "total_count": 30,
-                "top_entities": [
-                    {"name": "NIST", "count": 15},
-                    {"name": "CMMC", "count": 8},
-                    {"name": "FedRAMP", "count": 7}
-                ]
-            },
-            "clearance": {
-                "total_count": 20,
-                "top_entities": [
-                    {"name": "Top Secret", "count": 10},
-                    {"name": "Secret", "count": 8},
-                    {"name": "Public Trust", "count": 2}
-                ]
-            }
-        }
+        stats = graph.get_entity_statistics(entity_type)
+        return stats
     except Exception as e:
         logger.error(f"Entity statistics error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Entity statistics error: {str(e)}")
 
 @app.get("/sources")
-def get_data_sources(api_key: str = Depends(get_api_key)):
-    """Get information about available data sources"""
+def list_data_sources(api_key: str = Depends(get_api_key)):
+    """List available data sources"""
     return {
         "sources": [
             {
                 "id": "sam.gov",
                 "name": "SAM.gov",
                 "description": "Federal contract opportunities and awards",
-                "last_updated": None,
-                "status": "active"
+                "enabled": True
             },
             {
                 "id": "usaspending.gov",
                 "name": "USASpending.gov",
-                "description": "Federal spending data and contract details",
-                "last_updated": None,
-                "status": "active"
-            },
-            {
-                "id": "industry_news",
-                "name": "Industry News",
-                "description": "Government contracting news from industry sources",
-                "last_updated": None,
-                "status": "active"
+                "description": "Federal spending data including contract transactions",
+                "enabled": True
             }
+            # Add more sources as they are implemented
         ]
     }
 
-@app.get("/source/{source_id}")
-def get_source_data(source_id: str, api_key: str = Depends(get_api_key)):
-    """Get detailed information about a specific data source"""
-    sources = {
-        "sam.gov": {
-            "id": "sam.gov",
-            "name": "SAM.gov",
-            "description": "Federal contract opportunities and awards",
-            "endpoint": "https://api.sam.gov/opportunities/v1/search",
-            "data_types": ["opportunities", "awards", "entities"],
-            "last_updated": None,
-            "item_count": 0,
-            "status": "active",
-            "terms_of_use": "Data provided by SAM.gov is subject to specific terms of use. By using this system, you agree to only access data you are authorized to access, not use the data for unauthorized purposes, not share your API key with unauthorized parties, and update your API key every 90 days.",
-            "api_key_status": {
-                "present": bool(SAM_GOV_API_KEY),
-                "created": SAM_GOV_API_KEY_CREATED,
-                "requires_update": False
+@app.get("/data-insights")
+def get_data_insights(
+    days: int = Query(90, description="Number of days to analyze"),
+    graph: KnowledgeGraph = Depends(get_knowledge_graph),
+    api_key: str = Depends(get_api_key)
+):
+    """Get insights from collected data"""
+    try:
+        # This would call a more advanced analysis method in the knowledge graph
+        # For now, return a placeholder
+        return {
+            "time_period": f"Last {days} days",
+            "top_agencies": [
+                {"name": "Department of Defense", "contract_count": 42, "total_value": 4200000000},
+                {"name": "Department of Health and Human Services", "contract_count": 28, "total_value": 1800000000},
+                {"name": "General Services Administration", "contract_count": 15, "total_value": 950000000}
+            ],
+            "top_contractors": [
+                {"name": "TechDefense Solutions", "contract_count": 12, "total_value": 750000000},
+                {"name": "Federal Systems Inc", "contract_count": 8, "total_value": 520000000},
+                {"name": "CloudTech Services", "contract_count": 7, "total_value": 480000000}
+            ],
+            "top_technologies": [
+                {"name": "cloud", "contract_count": 35},
+                {"name": "cybersecurity", "contract_count": 28},
+                {"name": "artificial intelligence", "contract_count": 15}
+            ],
+            "trends": {
+                "fastest_growing_agencies": [
+                    {"name": "Department of Energy", "growth_rate": 0.28},
+                    {"name": "Department of Homeland Security", "growth_rate": 0.22}
+                ],
+                "fastest_growing_technologies": [
+                    {"name": "zero trust", "growth_rate": 0.45},
+                    {"name": "quantum", "growth_rate": 0.35}
+                ]
             }
-        },
-        "usaspending.gov": {
-            "id": "usaspending.gov",
-            "name": "USASpending.gov",
-            "description": "Federal spending data and contract details",
-            "endpoint": "https://api.usaspending.gov/api/v2/search/spending_by_award/",
-            "data_types": ["awards", "agencies", "recipients"],
-            "last_updated": None,
-            "item_count": 0,
-            "status": "active" 
-        },
-        "industry_news": {
-            "id": "industry_news",
-            "name": "Industry News",
-            "description": "Government contracting news from industry sources",
-            "sources": ["Washington Technology", "Federal News Network", "FCW"],
-            "data_types": ["news", "trends", "announcements"],
-            "last_updated": None,
-            "item_count": 0,
-            "status": "active"
         }
-    }
-    
-    if source_id not in sources:
-        raise HTTPException(status_code=404, detail=f"Source {source_id} not found")
-    
-    # Add API key status for SAM.gov
-    if source_id == "sam.gov" and SAM_GOV_API_KEY_CREATED:
-        try:
-            created_date = datetime.fromisoformat(SAM_GOV_API_KEY_CREATED)
-            days_old = (datetime.now() - created_date).days
-            sources[source_id]["api_key_status"]["days_old"] = days_old
-            sources[source_id]["api_key_status"]["requires_update"] = days_old > 80
-        except ValueError:
-            pass
-    
-    return sources[source_id]
+    except Exception as e:
+        logger.error(f"Data insights error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Data insights error: {str(e)}")
 
-@app.get("/api-key-status")
-def check_api_key_status(api_key: str = Depends(get_api_key)):
-    """Check the status of API keys"""
-    result = {
-        "sam_gov": {
-            "key_present": bool(SAM_GOV_API_KEY),
-            "created_date": None,
-            "days_old": None,
-            "status": "unknown",
-            "requires_update": False
-        }
-    }
-    
-    if SAM_GOV_API_KEY_CREATED:
-        try:
-            created_date = datetime.fromisoformat(SAM_GOV_API_KEY_CREATED)
-            days_old = (datetime.now() - created_date).days
-            
-            result["sam_gov"]["created_date"] = SAM_GOV_API_KEY_CREATED
-            result["sam_gov"]["days_old"] = days_old
-            
-            if days_old > 90:
-                result["sam_gov"]["status"] = "expired"
-                result["sam_gov"]["requires_update"] = True
-            elif days_old > 80:
-                result["sam_gov"]["status"] = "warning"
-                result["sam_gov"]["requires_update"] = True
-            else:
-                result["sam_gov"]["status"] = "valid"
-                result["sam_gov"]["requires_update"] = False
-        except ValueError:
-            result["sam_gov"]["status"] = "invalid_date_format"
-    
-    return result
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)

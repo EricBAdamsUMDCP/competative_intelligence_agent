@@ -1,46 +1,57 @@
+# core/processors/entity_extractor.py
 import spacy
-from spacy.tokens import Span, Doc
+from spacy.tokens import Span, DocBin
+from spacy.training import Example
 from spacy.language import Language
+from spacy.util import minibatch, compounding
 import logging
-from typing import Dict, List, Any, Set, Tuple, Optional
+from typing import Dict, List, Any, Set, Tuple, Optional, Union, Iterator
 import os
 import re
+import random
+import json
+from pathlib import Path
+import numpy as np
+from tqdm import tqdm
 
 class EntityExtractor:
     """Extract entities from government contract descriptions using NLP"""
     
-    def __init__(self, model_name: str = "en_core_web_lg"):
+    def __init__(self, model_name: str = "en_core_web_lg", custom_model_path: str = None):
         self.logger = logging.getLogger("entity_extractor")
         
         # Government contracting specific entities - INITIALIZE THIS FIRST
         self.govcon_entities = {
-            "CONTRACT_VEHICLE": ["IDIQ", "BPA", "GWAC", "GSA Schedule", "GWACs", "IDIQs", "BPAs", "OASIS", "Alliant", 
-                                "SEWP", "CIO-SP3", "STARS III", "8(a) STARS III", "VETS 2", "ASTRO", "POLARIS", "GSA MAS"],
-            "NAICS_CODE": ["541511", "541512", "541513", "541519", "518210", "541330", "541715", 
-                          "334220", "334290", "517311", "517312", "517410", "541714", "541713"],
-            "AGENCY": ["DoD", "Department of Defense", "DHS", "Department of Homeland Security", "HHS", "GSA", 
-                       "Department of Health and Human Services", "Department of Veterans Affairs", "VA", 
-                       "Department of Justice", "DOJ", "Department of State", "DOS", "Department of Energy", "DOE",
-                       "Department of Labor", "DOL", "Department of Treasury", "Department of Commerce", "DOC",
-                       "Department of Transportation", "DOT", "Department of Agriculture", "USDA",
-                       "NASA", "EPA", "IRS", "FBI", "CIA", "DARPA", "DISA", "USCIS", "FAA", "FEMA", "SEC"],
+            "CONTRACT_VEHICLE": ["IDIQ", "BPA", "GWAC", "GSA Schedule", "GWACs", "IDIQs", "BPAs", "OASIS", "Alliant", "SEWP", "CIO-SP3"],
+            "NAICS_CODE": [],  # Will be populated from patterns
+            "AGENCY": ["DoD", "Department of Defense", "DHS", "Department of Homeland Security", "HHS", "GSA"],
             "TECHNOLOGY": ["cloud", "cybersecurity", "artificial intelligence", "machine learning", "blockchain", 
-                          "IoT", "5G", "quantum", "zero trust", "DevSecOps", "microservices", "containerization",
-                          "kubernetes", "serverless", "data analytics", "big data", "edge computing", "digital twin",
-                          "RPA", "robotic process automation", "low-code", "no-code", "virtual reality", "augmented reality",
-                          "mixed reality", "biometrics", "cloud native", "API", "APIs", "SaaS", "PaaS", "IaaS", "FedRAMP",
-                          "AWS", "Azure", "GCP", "Google Cloud", "Amazon Web Services", "Microsoft Azure"],
-            "CLEARANCE": ["Top Secret", "TS/SCI", "Secret", "Confidential", "Public Trust", "TS", "SCI", 
-                          "Q Clearance", "L Clearance"],
-            "REGULATION": ["FAR", "DFAR", "CMMC", "NIST", "FedRAMP", "FISMA", "HIPAA", "ATO", "FIPS", 
-                          "NIST 800-53", "NIST 800-171", "NIST 800-53r4", "NIST 800-53r5", "NIST 800-171r2", 
-                          "CMMC 2.0", "CMMC Level 1", "CMMC Level 2", "CMMC Level 3", "FIPS 140-2", "FIPS 140-3", 
-                          "FIPS 199", "FIPS 200", "Section 508", "GDPR", "CCPA", "CPRA"],
-            "CONTRACT_TYPE": ["FFP", "T&M", "Firm Fixed Price", "Time and Materials", "Cost Plus", "CPFF", "CPIF", 
-                             "Cost Plus Fixed Fee", "Cost Plus Incentive Fee", "IDIQ", "BPA", "BOA", "GWAC"]
+                        "IoT", "5G", "quantum", "zero trust", "DevSecOps", "microservices"],
+            "CLEARANCE": ["Top Secret", "TS/SCI", "Secret", "Confidential", "Public Trust", "TS", "SCI"],
+            "REGULATION": ["FAR", "DFAR", "CMMC", "NIST", "FedRAMP", "FISMA", "HIPAA", "ATO"]
         }
         
-        # Load spaCy model
+        # Generate NAICS code patterns
+        for i in range(100000, 1000000):
+            if i % 100000 == 0:
+                self.govcon_entities["NAICS_CODE"].append(str(i))
+        
+        # Check if custom model exists and load if specified
+        if custom_model_path and os.path.exists(custom_model_path):
+            try:
+                self.logger.info(f"Loading custom NER model from {custom_model_path}")
+                self.nlp = spacy.load(custom_model_path)
+            except Exception as e:
+                self.logger.error(f"Failed to load custom model: {str(e)}. Falling back to standard model.")
+                self._load_standard_model(model_name)
+        else:
+            self._load_standard_model(model_name)
+        
+        # Add custom components AFTER initializing govcon_entities
+        self._add_custom_components()
+    
+    def _load_standard_model(self, model_name: str):
+        """Load standard spaCy model"""
         try:
             self.nlp = spacy.load(model_name)
             self.logger.info(f"Loaded spaCy model: {model_name}")
@@ -48,28 +59,7 @@ class EntityExtractor:
             self.logger.info(f"Downloading spaCy model: {model_name}")
             os.system(f"python -m spacy download {model_name}")
             self.nlp = spacy.load(model_name)
-        
-        # Add custom components AFTER initializing govcon_entities
-        self._add_custom_components()
-        
-        # Keywords for sentiment analysis
-        self.positive_words = [
-            "excellent", "outstanding", "innovative", "successful", "efficient",
-            "effective", "improved", "enhance", "benefit", "advantage", "superior",
-            "best", "leading", "advanced", "cutting-edge", "state-of-the-art",
-            "streamlined", "optimized", "collaborative", "partnership", "secure",
-            "reliable", "robust", "seamless", "high-quality", "cost-effective",
-            "savings", "increase", "improve", "modernize", "transform"
-        ]
-        
-        self.negative_words = [
-            "problem", "issue", "concern", "risk", "challenge", "difficult",
-            "complex", "failure", "failed", "poor", "inadequate", "deficient",
-            "outdated", "obsolete", "vulnerability", "breach", "delay", "over-budget",
-            "cost overrun", "behind schedule", "insecure", "unreliable", "unstable",
-            "inefficient", "expensive", "critical", "severe", "threat", "weakness"
-        ]
-        
+    
     def _add_custom_components(self):
         """Add custom NLP components to the pipeline"""
         # Add entity ruler for pattern-based entity recognition
@@ -81,21 +71,25 @@ class EntityExtractor:
         @Language.component("govcon_entities")
         def govcon_entities_component(doc):
             """Custom component to identify government contracting specific entities"""
+            # Store existing entities
+            original_ents = list(doc.ents)
+            
+            # Track entity spans to detect overlaps
+            entity_spans = [(ent.start, ent.end) for ent in original_ents]
+            
+            # Collect new entities
             new_ents = []
-            for ent in doc.ents:
-                # Extend entity spans for better entity boundaries
-                new_ents.append(ent)
             
             # Look for NAICS codes with regex
             naics_pattern = re.compile(r'\b\d{6}\b')
             for match in naics_pattern.finditer(doc.text):
-                start, end = match.span()
                 start_char = match.start()
                 end_char = match.end()
                 
-                # Find token span
+                # Find token span for character offsets
                 start_token = None
                 end_token = None
+                
                 for i, token in enumerate(doc):
                     if token.idx <= start_char < token.idx + len(token.text):
                         start_token = i
@@ -104,23 +98,15 @@ class EntityExtractor:
                         break
                 
                 if start_token is not None and end_token is not None:
-                    naics_ent = Span(doc, start_token, end_token, label="NAICS_CODE")
-                    new_ents.append(naics_ent)
+                    # Check for overlaps with existing entities
+                    if not any(start_token < e[1] and end_token > e[0] for e in entity_spans):
+                        naics_ent = Span(doc, start_token, end_token, label="NAICS_CODE")
+                        new_ents.append(naics_ent)
+                        # Add this span to our tracking list
+                        entity_spans.append((start_token, end_token))
             
-            # Filter out overlapping entities by keeping the longest one
-            filtered_ents = []
-            sorted_ents = sorted(new_ents, key=lambda e: e.end - e.start, reverse=True)
-            
-            # Keep track of token indices that are already part of an entity
-            covered_tokens = set()
-            for ent in sorted_ents:
-                token_indices = set(range(ent.start, ent.end))
-                if not any(idx in covered_tokens for idx in token_indices):
-                    filtered_ents.append(ent)
-                    covered_tokens.update(token_indices)
-            
-            # Sort entities by their position in the text
-            doc.ents = sorted(filtered_ents, key=lambda e: e.start)
+            # Combine original entities with new entities that don't overlap
+            doc.ents = original_ents + new_ents
             return doc
         
         # Add custom component to pipeline if not already added
@@ -142,19 +128,8 @@ class EntityExtractor:
                     if term[0].isupper():
                         patterns.append({"label": ent_type, "pattern": term.lower()})
         
-        # Add special patterns
-        # NAICS code pattern
+        # Special patterns for NAICS codes
         patterns.append({"label": "NAICS_CODE", "pattern": [{"SHAPE": "dddddd"}]})
-        
-        # Contract number patterns - e.g., "W91QF5-09-D-0022"
-        patterns.append({"label": "CONTRACT_NUMBER", "pattern": [
-            {"SHAPE": "ddddd?d?-dd-d-dddd"}
-        ]})
-        
-        # Contract number patterns - e.g., "N00178-15-D-8044"
-        patterns.append({"label": "CONTRACT_NUMBER", "pattern": [
-            {"SHAPE": "d?d?@@@dd-dd-d-dddd"}
-        ]})
         
         return patterns
     
@@ -169,8 +144,7 @@ class EntityExtractor:
             
             # Skip non-relevant entity types
             if ent_type not in ["PERSON", "ORG", "GPE", "LOC", "DATE", "MONEY", "PERCENT", "CARDINAL", 
-                               "CONTRACT_VEHICLE", "NAICS_CODE", "AGENCY", "TECHNOLOGY", "CLEARANCE", 
-                               "REGULATION", "CONTRACT_TYPE", "CONTRACT_NUMBER"]:
+                               "CONTRACT_VEHICLE", "NAICS_CODE", "AGENCY", "TECHNOLOGY", "CLEARANCE", "REGULATION"]:
                 continue
                 
             if ent_type not in entities:
@@ -183,202 +157,37 @@ class EntityExtractor:
                     "text": entity_text,
                     "start_char": ent.start_char,
                     "end_char": ent.end_char,
-                    "confidence": 0.9  # Placeholder confidence score
+                    "confidence": self._get_entity_confidence(ent)
                 })
         
         return entities
     
-    def extract_relationships(self, doc: Doc, entities: Dict[str, List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
-        """Extract relationships between entities using dependency parsing"""
-        relationships = []
+    def _get_entity_confidence(self, ent: Span) -> float:
+        """Calculate confidence score for an entity.
         
-        # Get entities by their character spans for easy lookup
-        entity_spans = {}
-        for entity_type, entity_list in entities.items():
-            for entity in entity_list:
-                span = (entity["start_char"], entity["end_char"])
-                entity_spans[span] = {
-                    "text": entity["text"],
-                    "type": entity_type
-                }
+        In a production model with a properly trained NER component,
+        we would extract the actual confidence. For now, we use a 
+        simple heuristic based on entity type.
         
-        # Analyze sentences
-        for sent in doc.sents:
-            # Look for verb dependency patterns between entities
-            for token in sent:
-                if token.dep_ == "ROOT" and token.pos_ == "VERB":
-                    # Find subject and object connected to this verb
-                    subject = None
-                    obj = None
-                    
-                    # Find subject
-                    for child in token.children:
-                        if child.dep_ in ["nsubj", "nsubjpass"]:
-                            subject_span = self._find_entity_containing_token(child, entity_spans)
-                            if subject_span:
-                                subject = entity_spans[subject_span]
-                    
-                    # Find object
-                    for child in token.children:
-                        if child.dep_ in ["dobj", "pobj"]:
-                            object_span = self._find_entity_containing_token(child, entity_spans)
-                            if object_span:
-                                obj = entity_spans[object_span]
-                    
-                    # If we found both subject and object, create relationship
-                    if subject and obj:
-                        relationship = {
-                            "source": subject["text"],
-                            "source_type": subject["type"],
-                            "target": obj["text"],
-                            "target_type": obj["type"],
-                            "relation": token.lemma_.upper(),
-                            "confidence": 0.8
-                        }
-                        relationships.append(relationship)
-        
-        # Add known entity type relationships
-        relationships.extend(self._extract_type_based_relationships(entities))
-        
-        return relationships
-    
-    def _find_entity_containing_token(self, token, entity_spans):
-        """Find if a token is within any entity span"""
-        token_start = token.idx
-        token_end = token.idx + len(token.text)
-        
-        for (start, end), entity in entity_spans.items():
-            if start <= token_start and token_end <= end:
-                return (start, end)
-        
-        return None
-    
-    def _extract_type_based_relationships(self, entities: Dict[str, List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
-        """Extract relationships based on entity types"""
-        relationships = []
-        
-        # Agency-Technology relationships
-        if "AGENCY" in entities and "TECHNOLOGY" in entities:
-            for agency in entities["AGENCY"]:
-                for tech in entities["TECHNOLOGY"]:
-                    relationships.append({
-                        "source": agency["text"],
-                        "source_type": "AGENCY",
-                        "target": tech["text"],
-                        "target_type": "TECHNOLOGY",
-                        "relation": "INTERESTED_IN",
-                        "confidence": 0.7
-                    })
-        
-        # Agency-Regulation relationships
-        if "AGENCY" in entities and "REGULATION" in entities:
-            for agency in entities["AGENCY"]:
-                for reg in entities["REGULATION"]:
-                    relationships.append({
-                        "source": agency["text"],
-                        "source_type": "AGENCY",
-                        "target": reg["text"],
-                        "target_type": "REGULATION",
-                        "relation": "COMPLIES_WITH",
-                        "confidence": 0.8
-                    })
-        
-        # Clearance requirements
-        if "AGENCY" in entities and "CLEARANCE" in entities:
-            for agency in entities["AGENCY"]:
-                for clearance in entities["CLEARANCE"]:
-                    relationships.append({
-                        "source": agency["text"],
-                        "source_type": "AGENCY",
-                        "target": clearance["text"],
-                        "target_type": "CLEARANCE",
-                        "relation": "REQUIRES",
-                        "confidence": 0.9
-                    })
-        
-        # Organization-Contract vehicle relationships
-        if "ORG" in entities and "CONTRACT_VEHICLE" in entities:
-            for org in entities["ORG"]:
-                for vehicle in entities["CONTRACT_VEHICLE"]:
-                    relationships.append({
-                        "source": org["text"],
-                        "source_type": "ORG",
-                        "target": vehicle["text"],
-                        "target_type": "CONTRACT_VEHICLE",
-                        "relation": "USES",
-                        "confidence": 0.6
-                    })
-        
-        # Organization-NAICS code relationships
-        if "ORG" in entities and "NAICS_CODE" in entities:
-            for org in entities["ORG"]:
-                for naics in entities["NAICS_CODE"]:
-                    relationships.append({
-                        "source": org["text"],
-                        "source_type": "ORG",
-                        "target": naics["text"],
-                        "target_type": "NAICS_CODE",
-                        "relation": "OPERATES_IN",
-                        "confidence": 0.7
-                    })
-        
-        return relationships
-    
-    def analyze_sentiment(self, text: str) -> Dict[str, Any]:
-        """Analyze sentiment in text"""
-        text = text.lower()
-        
-        try:
-            # Try using spaCy's built-in sentiment analysis if the model supports it
-            doc = self.nlp(text)
-            if hasattr(doc, "sentiment"):
-                # spaCy's sentiment is between -1 and 1
-                sentiment_score = doc.sentiment
-                if sentiment_score > 0.1:
-                    sentiment = "positive"
-                    score = 0.5 + (sentiment_score / 2)
-                elif sentiment_score < -0.1:
-                    sentiment = "negative"
-                    score = 0.5 - (abs(sentiment_score) / 2)
-                else:
-                    sentiment = "neutral"
-                    score = 0.5
-                
-                return {
-                    "sentiment": sentiment,
-                    "score": score,
-                    "method": "spacy_native"
-                }
-        except Exception:
-            # Fall back to keyword-based approach if spaCy's sentiment fails
-            pass
-        
-        # Keyword-based approach
-        # Count positive and negative words
-        pos_count = sum(1 for word in self.positive_words if word in text)
-        neg_count = sum(1 for word in self.negative_words if word in text)
-        
-        # Calculate sentiment
-        if pos_count > neg_count:
-            sentiment = "positive"
-            score = min(0.9, 0.5 + (pos_count - neg_count) / 10)
-        elif neg_count > pos_count:
-            sentiment = "negative"
-            score = min(0.9, 0.5 + (neg_count - pos_count) / 10)
+        Args:
+            ent: The entity span
+            
+        Returns:
+            Confidence score between 0.0 and 1.0
+        """
+        # Custom entity types get higher base confidence
+        if ent.label_ in self.govcon_entities:
+            base_confidence = 0.9
         else:
-            sentiment = "neutral"
-            score = 0.5
+            base_confidence = 0.75
         
-        return {
-            "sentiment": sentiment,
-            "score": score,
-            "positive_count": pos_count,
-            "negative_count": neg_count,
-            "method": "keyword_based"
-        }
+        # Minor adjustment for entity length (longer entities are slightly less confident)
+        length_factor = max(0.9, 1.0 - 0.01 * (len(ent.text.split()) - 1))
+        
+        return base_confidence * length_factor
     
     def process_document(self, document: Dict[str, Any]) -> Dict[str, Any]:
-        """Process a document and enhance with extracted entities, relationships, and sentiment"""
+        """Process a document and enhance with extracted entities"""
         # Combine relevant text fields
         text = " ".join([
             document.get('title', ''),
@@ -386,22 +195,11 @@ class EntityExtractor:
             document.get('additional_info', '')
         ])
         
-        # Process with spaCy
-        doc = self.nlp(text)
-        
         # Extract entities
         extracted_entities = self.extract_entities(text)
         
-        # Extract relationships
-        entity_relationships = self.extract_relationships(doc, extracted_entities)
-        
-        # Add sentiment analysis
-        sentiment = self.analyze_sentiment(text)
-        
         # Add to document
         document['extracted_entities'] = extracted_entities
-        document['entity_relationships'] = entity_relationships
-        document['sentiment_analysis'] = sentiment
         
         # Add entity summary
         document['entity_summary'] = self._generate_entity_summary(extracted_entities)
@@ -436,93 +234,679 @@ class EntityExtractor:
                 if any(keyword in ent["text"].lower() for keyword in gov_keywords)
             ]
         
-        # Extract contract vehicles
-        contract_vehicles = []
-        if "CONTRACT_VEHICLE" in entities:
-            contract_vehicles = [ent["text"] for ent in entities["CONTRACT_VEHICLE"]]
-        
-        # Extract contract types
-        contract_types = []
-        if "CONTRACT_TYPE" in entities:
-            contract_types = [ent["text"] for ent in entities["CONTRACT_TYPE"]]
-        
-        # Extract NAICS codes
-        naics_codes = []
-        if "NAICS_CODE" in entities:
-            naics_codes = [ent["text"] for ent in entities["NAICS_CODE"]]
-        
         # Build summary
         summary = {
             "tech_stack": tech_stack,
             "regulatory_requirements": regulatory_requirements,
             "clearance_requirements": clearance_requirements,
-            "agencies_involved": agencies_involved,
-            "contract_vehicles": contract_vehicles,
-            "contract_types": contract_types,
-            "naics_codes": naics_codes
+            "agencies_involved": agencies_involved
         }
         
         return summary
     
-    def batch_process_documents(self, documents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Process a batch of documents in parallel"""
-        processed_data = []
+    # CUSTOM MODEL TRAINING IMPLEMENTATION
+    
+    def train_custom_model(
+        self, 
+        training_data: List[Dict[str, Any]],
+        output_dir: str,
+        n_iter: int = 25,
+        batch_size: int = 16,
+        dropout: float = 0.2,
+        eval_split: float = 0.2,
+        base_model: str = None
+    ) -> Dict[str, Any]:
+        """Train a custom NER model for government contracting.
+        
+        Args:
+            training_data: List of training examples, each with 'text' and 'entities' fields
+            output_dir: Directory to save the trained model
+            n_iter: Number of training iterations
+            batch_size: Batch size for training
+            dropout: Dropout rate for training
+            eval_split: Fraction of data to use for evaluation
+            base_model: Base model to start from. If None, uses the current model.
+            
+        Returns:
+            Dictionary with training statistics
+            
+        Example training_data format:
+            [
+                {
+                    "text": "The Department of Defense requires cloud services with NIST compliance.",
+                    "entities": [
+                        {"start": 4, "end": 26, "label": "AGENCY"},
+                        {"start": 36, "end": 41, "label": "TECHNOLOGY"},
+                        {"start": 53, "end": 57, "label": "REGULATION"}
+                    ]
+                },
+                ...
+            ]
+        """
+        self.logger.info(f"Starting custom NER model training with {len(training_data)} examples")
+        
+        # Validate training data format
+        self._validate_training_data(training_data)
+        
+        # Create output directory if it doesn't exist
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Initialize new model or start with existing
+        if base_model:
+            try:
+                nlp = spacy.load(base_model)
+                self.logger.info(f"Using base model: {base_model}")
+            except:
+                self.logger.warning(f"Could not load base model {base_model}, creating new model")
+                nlp = spacy.blank("en")
+        else:
+            # Use current model as base
+            nlp = spacy.load(self.nlp.meta["name"])
+            self.logger.info(f"Using current model as base: {self.nlp.meta['name']}")
+        
+        # Prepare pipeline
+        if "ner" not in nlp.pipe_names:
+            ner = nlp.add_pipe("ner", last=True)
+        else:
+            ner = nlp.get_pipe("ner")
+        
+        # Add entity labels from training data
+        for example in training_data:
+            for entity in example.get("entities", []):
+                ner.add_label(entity["label"])
+        
+        # Split training data into train/eval sets
+        random.shuffle(training_data)
+        split_point = int(len(training_data) * (1 - eval_split))
+        train_data = training_data[:split_point]
+        eval_data = training_data[split_point:]
+        
+        self.logger.info(f"Training on {len(train_data)} examples, evaluating on {len(eval_data)} examples")
+        
+        # Convert to spaCy format
+        train_examples = self._create_examples(nlp, train_data)
+        eval_examples = self._create_examples(nlp, eval_data)
+        
+        # Get names of other pipes to disable during training
+        pipe_exceptions = ["ner", "trf_wordpiecer", "trf_tok2vec"]
+        other_pipes = [pipe for pipe in nlp.pipe_names if pipe not in pipe_exceptions]
+        
+        # Train the model
+        with nlp.disable_pipes(*other_pipes):
+            # Set up the optimizer
+            optimizer = nlp.create_optimizer()
+            
+            # Begin training
+            self.logger.info("Beginning training...")
+            batch_sizes = compounding(4.0, batch_size, 1.001)
+            
+            # Track metrics
+            train_losses = []
+            eval_metrics = []
+            
+            # Training loop
+            for i in range(n_iter):
+                # Shuffle training data
+                random.shuffle(train_examples)
+                losses = {}
+                
+                # Batch training
+                batches = minibatch(train_examples, size=batch_sizes)
+                for batch in tqdm(batches, desc=f"Iteration {i+1}/{n_iter}"):
+                    nlp.update(
+                        batch,
+                        drop=dropout,
+                        losses=losses,
+                        sgd=optimizer
+                    )
+                
+                # Track training loss
+                iteration_loss = losses.get("ner", 0)
+                train_losses.append(iteration_loss)
+                
+                # Evaluate on validation set every few iterations
+                if (i + 1) % 5 == 0 or i == n_iter - 1:
+                    eval_result = self._evaluate_model(nlp, eval_examples)
+                    eval_metrics.append(eval_result)
+                    
+                    self.logger.info(
+                        f"Iteration {i+1}: Loss: {iteration_loss:.4f}, "
+                        f"Precision: {eval_result['precision']:.4f}, "
+                        f"Recall: {eval_result['recall']:.4f}, "
+                        f"F1: {eval_result['f1']:.4f}"
+                    )
+        
+        # Save the trained model
+        model_path = os.path.join(output_dir, "model")
+        nlp.to_disk(model_path)
+        self.logger.info(f"Model saved to {model_path}")
+        
+        # Save training metrics
+        metrics_path = os.path.join(output_dir, "training_metrics.json")
+        metrics = {
+            "train_losses": train_losses,
+            "eval_metrics": eval_metrics,
+            "final_metrics": eval_metrics[-1] if eval_metrics else None,
+            "training_config": {
+                "n_iter": n_iter,
+                "batch_size": batch_size,
+                "dropout": dropout,
+                "eval_split": eval_split,
+                "base_model": base_model or self.nlp.meta["name"],
+                "training_examples": len(train_data),
+                "evaluation_examples": len(eval_data)
+            }
+        }
+        
+        with open(metrics_path, "w") as f:
+            json.dump(metrics, f, indent=2)
+        
+        self.logger.info(f"Training metrics saved to {metrics_path}")
+        
+        # Update the current model
+        self.nlp = nlp
+        self.logger.info("Updated current model to trained model")
+        
+        return metrics
+    
+    def _validate_training_data(self, training_data: List[Dict[str, Any]]):
+        """Validate the format of training data.
+        
+        Args:
+            training_data: List of training examples
+            
+        Raises:
+            ValueError: If training data format is invalid
+        """
+        if not training_data:
+            raise ValueError("Training data is empty")
+        
+        for i, example in enumerate(training_data):
+            if "text" not in example:
+                raise ValueError(f"Example {i} missing 'text' field")
+            
+            if "entities" not in example:
+                raise ValueError(f"Example {i} missing 'entities' field")
+            
+            if not isinstance(example["entities"], list):
+                raise ValueError(f"Example {i} 'entities' must be a list")
+            
+            text = example["text"]
+            
+            for j, entity in enumerate(example["entities"]):
+                if "start" not in entity or "end" not in entity or "label" not in entity:
+                    raise ValueError(f"Entity {j} in example {i} missing required fields")
+                
+                start, end = entity["start"], entity["end"]
+                
+                if not (0 <= start < end <= len(text)):
+                    raise ValueError(
+                        f"Entity {j} in example {i} has invalid character spans: "
+                        f"start={start}, end={end}, text length={len(text)}"
+                    )
+    
+    def _create_examples(self, nlp: Language, data: List[Dict[str, Any]]) -> List[Example]:
+        """Convert training data to spaCy Example objects.
+        
+        Args:
+            nlp: spaCy Language object
+            data: List of training examples
+            
+        Returns:
+            List of spaCy Example objects
+        """
+        examples = []
+        
+        for example in data:
+            text = example["text"]
+            entities = example.get("entities", [])
+            
+            # Create doc
+            doc = nlp.make_doc(text)
+            
+            # Sort entities by start position and then by length (longer entities first)
+            # This prioritizes longer entities when there are overlaps
+            sorted_entities = sorted(entities, key=lambda e: (e["start"], -1 * (e["end"] - e["start"])))
+            
+            # Track which tokens have been assigned to entities
+            token_to_entity = {}
+            ents = []
+            
+            for entity in sorted_entities:
+                start_char = entity["start"]
+                end_char = entity["end"]
+                label = entity["label"]
+                
+                # Find token span for character offsets
+                start_token = None
+                end_token = None
+                
+                for i, token in enumerate(doc):
+                    if token.idx <= start_char < token.idx + len(token.text) and start_token is None:
+                        start_token = i
+                    if token.idx <= end_char <= token.idx + len(token.text) and start_token is not None:
+                        end_token = i + 1
+                        break
+                
+                if start_token is not None and end_token is not None:
+                    # Check if any token in this span is already part of another entity
+                    overlap = False
+                    for i in range(start_token, end_token):
+                        if i in token_to_entity:
+                            overlap = True
+                            break
+                    
+                    # Skip this entity if there's an overlap
+                    if overlap:
+                        continue
+                    
+                    # Mark these tokens as used
+                    for i in range(start_token, end_token):
+                        token_to_entity[i] = label
+                    
+                    # Create entity span
+                    span = Span(doc, start_token, end_token, label=label)
+                    ents.append(span)
+            
+            # Set the entities on the doc
+            if ents:
+                doc.ents = ents
+            
+            # Create training example
+            reference = doc.copy()
+            reference.ents = ents
+            examples.append(Example(doc, reference))
+        
+        return examples
+    
+    def _evaluate_model(self, nlp: Language, examples: List[Example]) -> Dict[str, float]:
+        """Evaluate NER model performance on evaluation examples.
+        
+        Args:
+            nlp: spaCy Language object
+            examples: List of spaCy Example objects
+            
+        Returns:
+            Dictionary with precision, recall, and F1 score
+        """
+        tp = 0  # True positives
+        fp = 0  # False positives
+        fn = 0  # False negatives
+        
+        for example in examples:
+            # Get gold entities
+            gold_entities = [(e.start, e.end, e.label_) for e in example.reference.ents]
+            
+            # Get predicted entities
+            pred_doc = nlp(example.reference.text)
+            pred_entities = [(e.start, e.end, e.label_) for e in pred_doc.ents]
+            
+            # Count true positives, false positives, and false negatives
+            for entity in pred_entities:
+                if entity in gold_entities:
+                    tp += 1
+                else:
+                    fp += 1
+            
+            for entity in gold_entities:
+                if entity not in pred_entities:
+                    fn += 1
+        
+        # Calculate precision, recall, and F1
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+        
+        return {"precision": precision, "recall": recall, "f1": f1}
+    
+    def augment_training_data(
+        self, 
+        training_data: List[Dict[str, Any]],
+        augmentation_factor: int = 2,
+        synonym_replacement: bool = True,
+        word_insertion: bool = False,  # Disabled by default to avoid entity overlap issues
+        word_deletion: bool = False    # Disabled by default to avoid entity overlap issues
+    ) -> List[Dict[str, Any]]:
+        """Augment training data with various techniques.
+        
+        Args:
+            training_data: Original training data
+            augmentation_factor: Number of augmented examples to generate per original
+            synonym_replacement: Whether to use synonym replacement
+            word_insertion: Whether to use random word insertion (disabled by default)
+            word_deletion: Whether to use random word deletion (disabled by default)
+            
+        Returns:
+            Augmented training data
+        """
+        augmented_data = list(training_data)  # Start with original data
+        
+        # Load WordNet for synonyms if synonym replacement is enabled
+        if synonym_replacement:
+            try:
+                from nltk.corpus import wordnet
+                import nltk
+                nltk.download('wordnet', quiet=True)
+            except ImportError:
+                self.logger.warning("NLTK WordNet not available, disabling synonym replacement")
+                synonym_replacement = False
+        
+        # Process each training example
+        for example in training_data:
+            text = example["text"]
+            entities = example["entities"]
+            
+            # Skip examples with no entities
+            if not entities:
+                continue
+            
+            # Sort entities by start position to handle overlaps correctly
+            sorted_entities = sorted(entities, key=lambda e: e["start"])
+            
+            # Create entity spans
+            entity_spans = [(e["start"], e["end"]) for e in sorted_entities]
+            
+            # Generate augmented examples
+            for _ in range(augmentation_factor):
+                augmented_text = text
+                adjusted_entities = []
+                
+                # Track character offsets for entity adjustment
+                offset = 0
+                
+                # Process the text directly instead of using spaCy tokenization
+                # This avoids potential overlapping entity issues
+                words = text.split()
+                
+                # Create a mask of word positions that overlap with entities
+                entity_words = set()
+                current_pos = 0
+                
+                for i, word in enumerate(words):
+                    word_start = current_pos
+                    word_end = word_start + len(word)
+                    
+                    # Check if this word overlaps with any entity
+                    for start, end in entity_spans:
+                        if max(word_start, start) < min(word_end, end):
+                            entity_words.add(i)
+                            break
+                    
+                    current_pos = word_end + 1  # +1 for the space
+                
+                # Copy entities to adjusted_entities with initial offsets of 0
+                for entity in sorted_entities:
+                    adjusted_entities.append(entity.copy())
+                
+                # Perform synonym replacement
+                if synonym_replacement and random.random() < 0.7:
+                    modified_words = list(words)
+                    
+                    for i, word in enumerate(words):
+                        # Skip entity words, stopwords, short words
+                        if (i in entity_words or len(word) < 4 or 
+                            word.lower() in ['the', 'and', 'for', 'with', 'this', 'that']):
+                            continue
+                        
+                        # Random chance to replace with synonym
+                        if random.random() < 0.2:
+                            synonyms = []
+                            
+                            if synonym_replacement:
+                                # Get synonyms from WordNet
+                                for syn in wordnet.synsets(word.lower()):
+                                    for lemma in syn.lemmas():
+                                        synonym = lemma.name().replace('_', ' ')
+                                        if synonym != word.lower() and len(synonym) > 2:
+                                            synonyms.append(synonym)
+                            
+                            if synonyms:
+                                # Choose a random synonym
+                                synonym = random.choice(synonyms)
+                                
+                                # Replace word
+                                modified_words[i] = synonym
+                    
+                    # Reconstruct the text with synonyms
+                    # We'll rebuild character by character to correctly track offsets
+                    new_text = ""
+                    for i, word in enumerate(modified_words):
+                        if i > 0:
+                            new_text += " "
+                        
+                        old_word = words[i]
+                        new_word = word
+                        
+                        # Calculate the difference in length
+                        delta = len(new_word) - len(old_word)
+                        
+                        # Add the word to the new text
+                        new_text += new_word
+                        
+                        # Adjust the entities that come after this word
+                        if delta != 0:
+                            # Calculate the start position of this word
+                            word_pos = len(" ".join(words[:i]))
+                            if i > 0:
+                                word_pos += 1  # Add space
+                            
+                            # Word end position
+                            word_end = word_pos + len(old_word)
+                            
+                            # Update all entities that start after this word
+                            for j, entity in enumerate(adjusted_entities):
+                                if entity["start"] > word_end:
+                                    adjusted_entities[j]["start"] += delta
+                                    adjusted_entities[j]["end"] += delta
+                    
+                    # Use the modified text
+                    augmented_text = new_text
+                
+                # Add augmented example if it's different from the original
+                if augmented_text != text:
+                    augmented_data.append({
+                        "text": augmented_text,
+                        "entities": adjusted_entities
+                    })
+        
+        self.logger.info(f"Augmented {len(training_data)} examples to {len(augmented_data)} examples")
+        return augmented_data
+    
+    def save_model(self, output_dir: str):
+        """Save the current model to disk.
+        
+        Args:
+            output_dir: Directory to save the model
+        """
+        os.makedirs(output_dir, exist_ok=True)
+        self.nlp.to_disk(output_dir)
+        self.logger.info(f"Model saved to {output_dir}")
+    
+    def load_model(self, model_path: str):
+        """Load a model from disk.
+        
+        Args:
+            model_path: Path to the saved model
+            
+        Returns:
+            True if model loaded successfully, False otherwise
+        """
+        try:
+            self.nlp = spacy.load(model_path)
+            self.logger.info(f"Loaded model from {model_path}")
+            
+            # Re-add custom components
+            self._add_custom_components()
+            
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to load model from {model_path}: {str(e)}")
+            return False
+    
+    def export_training_data(self, documents: List[Dict[str, Any]], output_file: str):
+        """Export training data from processed documents.
+        
+        This is useful for creating a training dataset from documents
+        that have already been processed with pattern matching or
+        rule-based entity extraction.
+        
+        Args:
+            documents: List of processed documents with extracted entities
+            output_file: Path to save the training data
+        """
+        training_data = []
+        
         for doc in documents:
-            processed_data.append(self.process_document(doc))
-        return processed_data
-
-
-# Simple test if run directly
-if __name__ == "__main__":
-    # Configure logging
-    logging.basicConfig(level=logging.INFO)
+            # Skip documents without extracted entities
+            if "extracted_entities" not in doc:
+                continue
+            
+            # Get text from document
+            text = " ".join([
+                doc.get('title', ''),
+                doc.get('description', ''),
+                doc.get('additional_info', '')
+            ])
+            
+            # Skip empty text
+            if not text.strip():
+                continue
+            
+            # Extract entities in the format needed for training
+            entities = []
+            
+            for entity_type, entity_list in doc["extracted_entities"].items():
+                for entity in entity_list:
+                    # Check for required fields
+                    if "text" not in entity or "start_char" not in entity or "end_char" not in entity:
+                        continue
+                    
+                    # Add entity to training data
+                    entities.append({
+                        "start": entity["start_char"],
+                        "end": entity["end_char"],
+                        "label": entity_type
+                    })
+            
+            # Add example to training data
+            if entities:
+                training_data.append({
+                    "text": text,
+                    "entities": entities
+                })
+        
+        # Save training data to file
+        with open(output_file, "w") as f:
+            json.dump(training_data, f, indent=2)
+        
+        self.logger.info(f"Exported {len(training_data)} training examples to {output_file}")
+        
+        return len(training_data)
     
-    # Force flush on every print
-    import sys
-    print("Starting entity extractor test...", flush=True)
-    
-    try:
-        # Initialize extractor
-        extractor = EntityExtractor()
-        print("Entity extractor initialized", flush=True)
+    def generate_training_data_from_text(
+        self, 
+        texts: List[str],
+        output_file: str = None,
+        min_confidence: float = 0.8
+    ) -> List[Dict[str, Any]]:
+        """Generate training data from a list of texts.
         
-        # Test text
-        text = "The Department of Defense awarded a $10M cybersecurity contract to TechDefense Solutions for CMMC compliance."
-        print(f"Test text: {text}", flush=True)
+        Uses the current model to extract entities and convert
+        them to training data format.
         
-        # Process with spaCy
-        print("Processing text with spaCy...", flush=True)
-        doc = extractor.nlp(text)
-        print("Text processed successfully", flush=True)
+        Args:
+            texts: List of text strings
+            output_file: Optional path to save the training data
+            min_confidence: Minimum confidence threshold for entities
+            
+        Returns:
+            List of training examples
+        """
+        training_data = []
         
-        # Print entities
-        print("\nEntities found:", flush=True)
-        if len(doc.ents) == 0:
-            print("No entities found", flush=True)
-        else:
+        for text in texts:
+            # Extract entities
+            doc = self.nlp(text)
+            
+            # Convert to training data format
+            entities = []
+            
             for ent in doc.ents:
-                print(f"  {ent.text} ({ent.label_})", flush=True)
+                confidence = self._get_entity_confidence(ent)
+                
+                # Only include entities with high confidence
+                if confidence >= min_confidence:
+                    entities.append({
+                        "start": ent.start_char,
+                        "end": ent.end_char,
+                        "label": ent.label_
+                    })
+            
+            # Add example to training data
+            if entities:
+                training_data.append({
+                    "text": text,
+                    "entities": entities
+                })
         
-        # Extract relationships
-        print("\nExtracting relationships...", flush=True)
-        entities = extractor.extract_entities(text)
-        relationships = extractor.extract_relationships(doc, entities)
-        
-        # Print relationships
-        print("\nRelationships found:", flush=True)
-        if len(relationships) == 0:
-            print("No relationships found", flush=True)
+        # Save training data to file if specified
+        if output_file:
+            with open(output_file, "w") as f:
+                json.dump(training_data, f, indent=2)
+            
+            self.logger.info(f"Generated {len(training_data)} training examples and saved to {output_file}")
         else:
-            for rel in relationships:
-                print(f"  {rel['source']} ({rel['source_type']}) -{rel['relation']}-> {rel['target']} ({rel['target_type']})", flush=True)
+            self.logger.info(f"Generated {len(training_data)} training examples")
         
-        # Sentiment analysis
-        print("\nAnalyzing sentiment...", flush=True)
-        sentiment = extractor.analyze_sentiment(text)
-        print(f"Sentiment: {sentiment['sentiment']} (score: {sentiment['score']:.2f})", flush=True)
+        return training_data
+    
+    def create_training_doc_bin(self, training_data: List[Dict[str, Any]], output_file: str):
+        """Create a spaCy DocBin file from training data.
         
-        print("\nspaCy is working correctly!", flush=True)
-    except Exception as e:
-        print(f"Error: {str(e)}", flush=True)
-        import traceback
-        traceback.print_exc()
+        This is useful for training with spaCy's CLI.
+        
+        Args:
+            training_data: Training data
+            output_file: Path to save the DocBin file
+        """
+        nlp = spacy.blank("en")
+        db = DocBin()
+        
+        for example in training_data:
+            text = example["text"]
+            entities = example.get("entities", [])
+            
+            # Create doc
+            doc = nlp.make_doc(text)
+            ents = []
+            
+            # Add entities
+            for entity in entities:
+                start_char = entity["start"]
+                end_char = entity["end"]
+                label = entity["label"]
+                
+                # Find token span
+                start_token = None
+                end_token = None
+                
+                for i, token in enumerate(doc):
+                    if token.idx <= start_char < token.idx + len(token.text):
+                        start_token = i
+                    if token.idx <= end_char <= token.idx + len(token.text) and start_token is not None:
+                        end_token = i + 1
+                        break
+                
+                if start_token is not None and end_token is not None:
+                    span = Span(doc, start_token, end_token, label=label)
+                    ents.append(span)
+            
+            # Set entities
+            doc.ents = ents
+            
+            # Add to DocBin
+            db.add(doc)
+        
+        # Save DocBin
+        db.to_disk(output_file)
+        self.logger.info(f"Created DocBin with {len(training_data)} documents and saved to {output_file}")
